@@ -9,7 +9,7 @@
     "portable/packages/*"
   ],
   "scripts": {
-    "test": "node --test portable/packages/platform/test/paths.test.mjs",
-    "test:platform": "node --test portable/packages/platform/test/paths.test.mjs"
+    "test": "node --test \"portable/packages/platform/test/*.test.mjs\"",
+    "test:platform": "node --test \"portable/packages/platform/test/*.test.mjs\""
   }
 }
