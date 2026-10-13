@@ -1,10 +1,51 @@
 import { createServer } from "node:http";
 import path from "node:path";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import { ensureAppDirectories } from "../../../packages/platform/src/directories.mjs";
 import { createAppLogger } from "../../../packages/platform/src/logging.mjs";
 
 const DEFAULT_PORT = 3141;
+const WORKBENCH_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const CONTENT_TYPES = new Map([
+  [".html", "text/html; charset=utf-8"],
+  [".css", "text/css; charset=utf-8"],
+  [".js", "text/javascript; charset=utf-8"],
+]);
+
+async function serveWorkbench(request, response) {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  const pathname = new URL(request.url, "http://127.0.0.1").pathname;
+  const relative = pathname === "/" ? "workbench.html" : decodeURIComponent(pathname.slice(1));
+  const target = path.resolve(WORKBENCH_ROOT, relative);
+  if (target !== WORKBENCH_ROOT && !target.startsWith(`${WORKBENCH_ROOT}${path.sep}`)) {
+    response.writeHead(404);
+    response.end();
+    return true;
+  }
+  try {
+    const body = await readFile(target);
+    const type = CONTENT_TYPES.get(path.extname(target).toLowerCase());
+    if (!type) {
+      response.writeHead(404);
+      response.end();
+      return true;
+    }
+    response.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": type,
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    });
+    response.end(request.method === "HEAD" ? undefined : body);
+  } catch (error) {
+    if (error.code !== "ENOENT" && error.code !== "EISDIR") throw error;
+    response.writeHead(404);
+    response.end();
+  }
+  return true;
+}
 
 function parsePort(value) {
   const port = Number(value);
@@ -27,6 +68,7 @@ export async function startLocalRuntime(options = {}) {
   const logger = createAppLogger(path.join(directories.logs, "runtime.jsonl"));
 
   const server = createServer((request, response) => {
+    void (async () => {
     if (request.method === "GET" && request.url === "/health") {
       response.writeHead(200, {
         "cache-control": "no-store",
@@ -35,8 +77,14 @@ export async function startLocalRuntime(options = {}) {
       response.end(JSON.stringify({ service: "all-round-ai", status: "ok" }));
       return;
     }
+    if (await serveWorkbench(request, response)) return;
     response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
     response.end(JSON.stringify({ error: "Not found" }));
+    })().catch((error) => {
+      if (!response.headersSent) response.writeHead(500);
+      response.end();
+      void logger.error("Request failed", { message: error.message });
+    });
   });
 
   await new Promise((resolve, reject) => {

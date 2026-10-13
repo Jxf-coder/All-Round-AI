@@ -26,9 +26,28 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.equal(health.headers.get("cache-control"), "no-store");
     assert.deepEqual(await health.json(), { service: "all-round-ai", status: "ok" });
 
-    const unknown = await fetch(`${runtime.url}/`);
+    const page = await fetch(`${runtime.url}/`);
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type"), /text\/html/);
+    assert.match(page.headers.get("content-security-policy"), /default-src 'self'/);
+    assert.match(await page.text(), /All Round AI 工作台/);
+
+    const style = await fetch(`${runtime.url}/workbench.css`);
+    assert.equal(style.status, 200);
+    assert.match(style.headers.get("content-type"), /text\/css/);
+    assert.match(await style.text(), /\.topbar/);
+
+    const script = await fetch(`${runtime.url}/workbench.js`);
+    assert.equal(script.status, 200);
+    assert.match(script.headers.get("content-type"), /javascript/);
+    assert.match(await script.text(), /submitMessage/);
+
+    const head = await fetch(`${runtime.url}/`, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+
+    const unknown = await fetch(`${runtime.url}/not-a-workbench-file`);
     assert.equal(unknown.status, 404);
-    assert.deepEqual(await unknown.json(), { error: "Not found" });
 
     await runtime.close();
     await runtime.close();
