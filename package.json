@@ -1,0 +1,15 @@
+{
+  "name": "all-round-ai",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "workspaces": [
+    "portable/packages/*"
+  ],
+  "scripts": {
+    "test": "node --test portable/packages/platform/test/paths.test.mjs",
+    "test:platform": "node --test portable/packages/platform/test/paths.test.mjs"
+  }
+}
