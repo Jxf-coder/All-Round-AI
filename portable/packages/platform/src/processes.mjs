@@ -13,13 +13,26 @@ export async function startManagedProcess(executable, args = [], options = {}) {
   }
 
   const platform = options.platform ?? process.platform;
+  if (options.shutdownMessage !== undefined && typeof options.shutdownMessage !== "string") {
+    throw new TypeError("shutdownMessage must be a string");
+  }
+  if (
+    options.shutdownMessage &&
+    options.stdio !== undefined &&
+    options.stdio !== "pipe" &&
+    (!Array.isArray(options.stdio) || options.stdio[0] !== "pipe")
+  ) {
+    throw new TypeError("A shutdownMessage requires piped standard input");
+  }
   const child = spawn(
     executable,
     args,
     buildSpawnOptions(platform, {
       cwd: options.cwd,
       env: options.env,
-      stdio: options.stdio ?? "ignore",
+      stdio:
+        options.stdio ??
+        (options.shutdownMessage ? ["pipe", "ignore", "ignore"] : "ignore"),
     }),
   );
 
@@ -30,7 +43,7 @@ export async function startManagedProcess(executable, args = [], options = {}) {
     rejectExit = reject;
   });
   exit.catch(() => {});
-  const state = { exit, settled: false };
+  const state = { exit, settled: false, shutdownMessage: options.shutdownMessage };
   processStates.set(child, state);
   child.once("error", (error) => {
     state.settled = true;
@@ -63,7 +76,11 @@ export async function stopManagedProcess(child, options = {}) {
   }
   if (state.settled) return state.exit;
 
-  child.kill(options.signal ?? "SIGTERM");
+  if (state.shutdownMessage && child.stdin?.writable) {
+    child.stdin.end(state.shutdownMessage + "\n");
+  } else {
+    child.kill(options.signal ?? "SIGTERM");
+  }
   let timer;
   const timedOut = new Promise((resolve) => {
     timer = setTimeout(() => resolve(null), timeoutMs);

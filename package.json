@@ -9,7 +9,8 @@
     "portable/packages/*"
   ],
   "scripts": {
-    "test": "node --test \"portable/packages/platform/test/*.test.mjs\"",
-    "test:platform": "node --test \"portable/packages/platform/test/*.test.mjs\""
+    "start": "node portable/apps/runtime/src/main.mjs",
+    "test": "node --test \"portable/packages/platform/test/*.test.mjs\" \"portable/apps/runtime/test/*.test.mjs\"",
+    "test:platform": "node --test \"portable/packages/platform/test/*.test.mjs\" \"portable/apps/runtime/test/*.test.mjs\""
   }
 }

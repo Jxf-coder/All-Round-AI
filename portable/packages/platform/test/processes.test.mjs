@@ -34,6 +34,13 @@ test("process adapter validates command arguments and stop options", async () =>
   await assert.rejects(startManagedProcess("", []), /executable is required/);
   await assert.rejects(startManagedProcess(process.execPath, [1]), /array of strings/);
   await assert.rejects(
+    startManagedProcess(process.execPath, [], {
+      shutdownMessage: "stop",
+      stdio: "ignore",
+    }),
+    /requires piped standard input/,
+  );
+  await assert.rejects(
     stopManagedProcess({}, { timeoutMs: 1 }),
     /not started by this platform adapter/,
   );
