@@ -30,7 +30,13 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.equal(page.status, 200);
     assert.match(page.headers.get("content-type"), /text\/html/);
     assert.match(page.headers.get("content-security-policy"), /default-src 'self'/);
-    assert.match(await page.text(), /All Round AI 工作台/);
+    const pageHtml = await page.text();
+    assert.match(pageHtml, /All Round AI 工作台/);
+    assert.match(pageHtml, /ALL ROUND AI · AI WORKSPACE/);
+    assert.match(pageHtml, /href="workbench\.css"/);
+    assert.match(pageHtml, /src="workbench\.js"/);
+    assert.equal(new URL("workbench.css", `${runtime.url}/`).pathname, "/workbench.css");
+    assert.doesNotMatch(pageHtml, /~legacy-brand~/i);
 
     const style = await fetch(`${runtime.url}/workbench.css`);
     assert.equal(style.status, 200);
@@ -49,6 +55,7 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(loginHtml, /All Round AI 工作台/);
     assert.match(loginHtml, /href="login\.css"/);
     assert.match(loginHtml, /src="login\.js"/);
+    assert.equal(new URL("login.css", `${runtime.url}/login`).pathname, "/login.css");
     const trailingSlash = await fetch(`${runtime.url}/login/?next=%2Fworkbench`, { redirect: "manual" });
     assert.equal(trailingSlash.status, 308);
     assert.equal(trailingSlash.headers.get("location"), "/login?next=%2Fworkbench");
