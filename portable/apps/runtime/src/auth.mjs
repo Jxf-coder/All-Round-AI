@@ -78,7 +78,7 @@ function safeUser(value) {
     name: value.name.trim().slice(0, 100),
     role: typeof value.role === "string" ? value.role.slice(0, 40) : "member",
     ...(typeof value.roleLabel === "string" ? { roleLabel: value.roleLabel.slice(0, 80) } : {}),
-    source: ["legacy", "itar", "local"].includes(value.source) ? value.source : "local",
+    source: ["all-round-ai", "local"].includes(value.source) ? value.source : "local",
     ...(typeof value.avatarUrl === "string" ? { avatarUrl: value.avatarUrl.slice(0, 2048) } : {}),
     mustChangePassword: Boolean(value.mustChangePassword),
   };
@@ -153,8 +153,8 @@ export function createLocalAuth(options = {}) {
         return true;
       }
       if (!result || result.ok !== true) {
-        // Match the source login route: its All Round AI adapter exposes 502 for an
-        // unavailable/malformed upstream; all other credential rejections are 401.
+        // Preserve the source application's observable distinction: service
+        // failures use 502; ordinary credential rejections use 401.
         const status = result?.status === 502 ? 502 : 401;
         const error = typeof result?.error === "string"
           ? result.error.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 160)

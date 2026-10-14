@@ -53,7 +53,7 @@ test("mock provider covers rejected credentials, cookie session, safe landing an
         name: "Test User",
         role: "admin",
         roleLabel: "管理员",
-        source: "legacy",
+        source: "all-round-ai",
         avatarUrl: "/avatar/test.png",
         mustChangePassword: true,
       },
@@ -168,7 +168,7 @@ test("auth endpoints validate method, content type, JSON body and required field
   });
 });
 
-test("authentication failures preserve the source 401/502 contract", async () => {
+test("authentication failures preserve the 401/502 contract", async () => {
   const providers = [
     ["upstream credential rejection", async () => ({ ok: false, status: 403, error: "账号状态不可用" }), 401, "账号状态不可用"],
     ["upstream outage", async () => ({ ok: false, status: 502, error: "管理后台服务未启动" }), 502, "管理后台服务未启动"],
