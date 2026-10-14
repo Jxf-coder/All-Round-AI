@@ -99,6 +99,14 @@ export async function createAccountStore(filePath) {
     async count() {
       return (await readStore()).users.length;
     },
+    async list() {
+      const document = await readStore();
+      return document.users.map((user) => ({
+        ...publicUser(user),
+        username: user.username,
+        createdAt: user.createdAt,
+      }));
+    },
     async create({ username: rawUsername, password, role = "member", displayName } = {}) {
       const username = normalizeUsername(rawUsername);
       if (!username) throw new TypeError("账号必须是有效邮箱或国际格式手机号");

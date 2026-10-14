@@ -371,6 +371,9 @@ export function createLocalAuth(options = {}) {
     handle,
     hasSession,
     sessionIsValid,
+    async currentUser(request) {
+      return (await sessionIsValid(request)) ? readSession(request)?.user ?? null : null;
+    },
     mustChangePassword(request) {
       return readSession(request)?.user.mustChangePassword === true;
     },

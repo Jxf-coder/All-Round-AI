@@ -122,6 +122,37 @@ export async function startLocalRuntime(options = {}) {
     }
     if (await auth.handle(request, response)) return;
     const requestUrl = incomingUrl;
+    if (requestUrl.pathname === "/api/admin/accounts") {
+      if (request.method !== "GET") {
+        response.writeHead(405, { "allow": "GET", "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "Method not allowed" }));
+        return;
+      }
+      const actor = await auth.currentUser(request);
+      if (!actor) {
+        response.writeHead(401, { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "请先登录" }));
+        return;
+      }
+      if (auth.mustChangePassword(request)) {
+        response.writeHead(403, { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "请先修改初始密码" }));
+        return;
+      }
+      if (actor.role !== "admin") {
+        response.writeHead(403, { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: "没有管理员权限" }));
+        return;
+      }
+      const accounts = await accountStore.list();
+      response.writeHead(200, {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "x-content-type-options": "nosniff",
+      });
+      response.end(JSON.stringify({ accounts }));
+      return;
+    }
     if (auth.enabled && isProtectedPage(requestUrl.pathname) && !(await auth.sessionIsValid(request))) {
       response.writeHead(302, { "cache-control": "no-store", location: "/login?next=" + encodeURIComponent(requestUrl.pathname + requestUrl.search) });
       response.end();

@@ -27,6 +27,11 @@ test("native accounts normalize email and phone, persist only salted password ha
     assert.equal(created.source, "all-round-ai");
     assert.equal(created.mustChangePassword, true);
     assert.equal(await store.count(), 1);
+    assert.deepEqual(await store.list(), [{
+      ...created,
+      username: "user@example.test",
+      createdAt: (await store.list())[0].createdAt,
+    }]);
     const persisted = await readFile(filePath, "utf8");
     assert.equal(persisted.includes(password), false);
     assert.match(persisted, /"salt"/);
@@ -277,6 +282,76 @@ test("account setup command provisions an admin without putting a password in it
     assert.equal(memberResult.status, 0, memberResult.stderr);
     assert.match(memberResult.stdout, /All Round AI member account created/);
     assert.equal(await store.count(), 2);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("account directory requires a changed admin password, enforces roles and omits credential material", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-account-directory-"));
+  const dataDirectory = path.join(temporaryRoot, "data");
+  const store = await createAccountStore(path.join(dataDirectory, "config", "accounts.json"));
+  const adminPassword = "initial-admin-password-2026";
+  const memberPassword = "initial-member-password-2026";
+  await store.create({ username: "admin@example.test", password: adminPassword, role: "admin" });
+  await store.create({ username: "member@example.test", password: memberPassword, role: "member" });
+  let runtime;
+
+  try {
+    runtime = await startLocalRuntime({
+      accountStore: store,
+      env: { ALLROUND_AI_DATA_DIR: dataDirectory, LOCALAPPDATA: temporaryRoot },
+      home: temporaryRoot,
+      port: 0,
+    });
+
+    const endpoint = `${runtime.url}/api/admin/accounts`;
+    assert.equal((await fetch(endpoint)).status, 401);
+
+    async function login(username, password) {
+      const response = await fetch(`${runtime.url}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: runtime.url },
+        body: JSON.stringify({ user: username, password }),
+      });
+      assert.equal(response.status, 200);
+      return response.headers.get("set-cookie").split(";")[0];
+    }
+
+    async function changePassword(cookie, currentPassword, newPassword) {
+      const response = await fetch(`${runtime.url}/api/auth/change-password`, {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json", origin: runtime.url },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      assert.equal(response.status, 200);
+      return response.headers.get("set-cookie").split(";")[0];
+    }
+
+    const firstAdminCookie = await login("admin@example.test", adminPassword);
+    const firstLoginList = await fetch(endpoint, { headers: { cookie: firstAdminCookie } });
+    assert.equal(firstLoginList.status, 403);
+    assert.match((await firstLoginList.json()).error, /修改初始密码/);
+
+    const adminCookie = await changePassword(firstAdminCookie, adminPassword, "updated-admin-password-2026");
+    const adminList = await fetch(endpoint, { headers: { cookie: adminCookie } });
+    assert.equal(adminList.status, 200);
+    const { accounts } = await adminList.json();
+    assert.equal(accounts.length, 2);
+    assert.deepEqual(accounts.map(({ username, role }) => ({ username, role })), [
+      { username: "admin@example.test", role: "admin" },
+      { username: "member@example.test", role: "member" },
+    ]);
+    assert.ok(accounts.every((account) => typeof account.createdAt === "string"));
+    assert.equal(JSON.stringify(accounts).includes("passwordHash"), false);
+    assert.equal(JSON.stringify(accounts).includes("salt"), false);
+
+    const firstMemberCookie = await login("member@example.test", memberPassword);
+    const memberCookie = await changePassword(firstMemberCookie, memberPassword, "updated-member-password-2026");
+    const memberList = await fetch(endpoint, { headers: { cookie: memberCookie } });
+    assert.equal(memberList.status, 403);
+    assert.match((await memberList.json()).error, /管理员权限/);
   } finally {
     if (runtime) await runtime.close().catch(() => {});
     await rm(temporaryRoot, { recursive: true, force: true });
