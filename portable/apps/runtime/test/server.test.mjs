@@ -42,6 +42,19 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(script.headers.get("content-type"), /javascript/);
     assert.match(await script.text(), /submitMessage/);
 
+    const login = await fetch(`${runtime.url}/login`);
+    assert.equal(login.status, 200);
+    assert.match(login.headers.get("content-type"), /text\/html/);
+    assert.match(await login.text(), /All Round AI 工作台/);
+    const loginStyle = await fetch(`${runtime.url}/login.css`);
+    assert.equal(loginStyle.status, 200);
+    assert.match(loginStyle.headers.get("content-type"), /text\/css/);
+    assert.match(await loginStyle.text(), /\.login-form/);
+    const loginScript = await fetch(`${runtime.url}/login.js`);
+    assert.equal(loginScript.status, 200);
+    assert.match(loginScript.headers.get("content-type"), /javascript/);
+    assert.match(await loginScript.text(), /没有发送/);
+
     const head = await fetch(`${runtime.url}/`, { method: "HEAD" });
     assert.equal(head.status, 200);
     assert.equal(await head.text(), "");

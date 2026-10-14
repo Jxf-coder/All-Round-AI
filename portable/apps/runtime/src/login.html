@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#0b1220">
+  <title>登录 · All Round AI</title><link rel="stylesheet" href="/login.css"><script src="/login.js" defer></script>
+</head>
+<body>
+  <main class="login-page">
+    <div class="login-glow login-glow-top" aria-hidden="true"></div><div class="login-glow login-glow-bottom" aria-hidden="true"></div>
+    <div class="login-brand-area">
+      <a class="login-brand" href="/" aria-label="All Round AI 工作台"><span class="login-brand-mark">A</span><span>All Round AI</span></a>
+      <p class="login-tagline">AI 工作台 · 智能协作 · 助力创造</p>
+    </div>
+    <form class="login-form" id="login-form" novalidate>
+      <label><span>手机号或邮箱</span><input id="login-user" name="username" type="text" autocomplete="username" placeholder="请输入账号" required></label>
+      <label><span>密码</span><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
+      <p class="login-error" id="login-error" role="alert" aria-live="polite" hidden></p>
+      <button type="submit" id="login-submit">登录</button>
+      <p class="auth-notice">登录服务尚未连接。此版本不会发送或保存你输入的账号和密码。</p>
+    </form>
+    <p class="login-foot">All Round AI · 本地工作台</p>
+  </main>
+</body>
+</html>
