@@ -92,6 +92,9 @@ export async function startLocalRuntime(options = {}) {
   const auth = createLocalAuth({
     provider: options.authProvider ?? createAccountProvider(accountStore),
     sessionTtlMs: options.authSessionTtlMs,
+    loginFailureLimit: options.loginFailureLimit,
+    loginFailureWindowMs: options.loginFailureWindowMs,
+    now: options.authNow,
   });
 
   const server = createServer((request, response) => {

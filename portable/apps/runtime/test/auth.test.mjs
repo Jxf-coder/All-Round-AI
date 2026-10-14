@@ -192,6 +192,48 @@ test("authentication failures preserve the 401/502 contract", async () => {
   }
 });
 
+test("login failure limit is per normalized account, expires, clears after success and skips outages", async () => {
+  const checked = [];
+  let now = 1_000;
+  const authProvider = async ({ user, password }) => {
+    checked.push(user);
+    if (password === "provider-outage") return { ok: false, status: 502 };
+    if (password === "valid-password") {
+      return { ok: true, user: { id: user, name: user, role: "member" } };
+    }
+    return { ok: false, status: 401 };
+  };
+  await withRuntime({ authProvider, loginFailureLimit: 2, loginFailureWindowMs: 80, authNow: () => now }, async (runtime) => {
+    const attempt = (user, password) => fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user, password }),
+    });
+
+    assert.equal((await attempt("USER@example.test", "bad-one")).status, 401);
+    assert.equal((await attempt("user@example.test", "bad-two")).status, 401);
+    const limited = await attempt("User@example.test", "bad-three");
+    assert.equal(limited.status, 429);
+    assert.match(limited.headers.get("retry-after"), /^[1-9]\d*$/);
+    assert.equal((await limited.json()).error, "登录尝试过多，请稍后重试");
+    assert.equal(checked.length, 2, "blocked attempts must not reach the provider");
+
+    assert.equal((await attempt("another@example.test", "bad")).status, 401);
+    now += 81;
+    assert.equal((await attempt("success@example.test", "bad-before-success")).status, 401);
+    assert.equal((await attempt("success@example.test", "valid-password")).status, 200);
+    assert.equal((await attempt("success@example.test", "bad-after-success-1")).status, 401);
+    assert.equal((await attempt("success@example.test", "bad-after-success-2")).status, 401);
+    assert.equal((await attempt("success@example.test", "blocked-after-success")).status, 429);
+    assert.equal((await attempt("user@example.test", "provider-outage")).status, 502);
+    assert.equal((await attempt("user@example.test", "bad-after-outage")).status, 401);
+    assert.equal((await attempt("user@example.test", "valid-password")).status, 200);
+    assert.equal((await attempt("user@example.test", "bad-after-success")).status, 401);
+    assert.equal((await attempt("USER@example.test", "bad-again")).status, 401);
+    assert.equal((await attempt("user@example.test", "blocked-again")).status, 429);
+  });
+});
+
 test("native session expires and is removed from the runtime session map", async () => {
   const authProvider = async () => ({
     ok: true,

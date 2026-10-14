@@ -1,9 +1,12 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 const COOKIE = "all_round_ai_session";
 const MAX_BODY = 16 * 1024;
 const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const MAX_ACTIVE_SESSIONS = 1000;
+const DEFAULT_LOGIN_FAILURE_LIMIT = 5;
+const DEFAULT_LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const MAX_TRACKED_LOGIN_KEYS = 10_000;
 
 function json(response, status, value, headers = {}) {
   response.writeHead(status, {
@@ -109,7 +112,28 @@ export function createLocalAuth(options = {}) {
   if (!Number.isSafeInteger(sessionTtlMs) || sessionTtlMs < 1) {
     throw new TypeError("Session TTL must be a positive safe integer");
   }
+  const loginFailureLimit = options.loginFailureLimit ?? DEFAULT_LOGIN_FAILURE_LIMIT;
+  const loginFailureWindowMs = options.loginFailureWindowMs ?? DEFAULT_LOGIN_FAILURE_WINDOW_MS;
+  const now = options.now ?? Date.now;
+  if (!Number.isSafeInteger(loginFailureLimit) || loginFailureLimit < 1
+    || !Number.isSafeInteger(loginFailureWindowMs) || loginFailureWindowMs < 1 || typeof now !== "function") {
+    throw new TypeError("Login failure limit and window must be positive safe integers");
+  }
   const sessions = new Map();
+  const loginFailures = new Map();
+  const loginKey = (username) => createHash("sha256")
+    .update(username.normalize("NFKC").trim().toLowerCase())
+    .digest("hex");
+  const pruneLoginFailures = (now) => {
+    for (const [key, failures] of loginFailures) {
+      const recent = failures.filter((timestamp) => now - timestamp < loginFailureWindowMs);
+      if (recent.length) loginFailures.set(key, recent);
+      else loginFailures.delete(key);
+    }
+    while (loginFailures.size > MAX_TRACKED_LOGIN_KEYS) {
+      loginFailures.delete(loginFailures.keys().next().value);
+    }
+  };
   const readSession = (request) => {
     const id = cookie(request);
     const session = id ? sessions.get(id) : null;
@@ -166,6 +190,15 @@ export function createLocalAuth(options = {}) {
         json(response, 503, { error: "登录服务尚未配置" });
         return true;
       }
+      const throttleKey = loginKey(user);
+      const attemptedAt = now();
+      pruneLoginFailures(attemptedAt);
+      const priorFailures = loginFailures.get(throttleKey) || [];
+      if (priorFailures.length >= loginFailureLimit) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((priorFailures[0] + loginFailureWindowMs - attemptedAt) / 1000));
+        json(response, 429, { error: "登录尝试过多，请稍后重试" }, { "retry-after": String(retryAfterSeconds) });
+        return true;
+      }
       let result;
       try {
         result = await provider({ user, password });
@@ -180,6 +213,12 @@ export function createLocalAuth(options = {}) {
         const error = typeof result?.error === "string"
           ? result.error.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 160)
           : "";
+        if (status === 401) {
+          const failures = loginFailures.get(throttleKey) || [];
+          failures.push(attemptedAt);
+          loginFailures.set(throttleKey, failures);
+          pruneLoginFailures(attemptedAt);
+        }
         json(response, status, { error: error || "账号或密码错误" });
         return true;
       }
@@ -188,6 +227,7 @@ export function createLocalAuth(options = {}) {
         json(response, 502, { error: "认证服务返回格式异常" });
         return true;
       }
+      loginFailures.delete(throttleKey);
       pruneSessions();
       if (sessions.size >= MAX_ACTIVE_SESSIONS) {
         json(response, 503, { error: "当前登录会话较多，请稍后重试" });
