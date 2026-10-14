@@ -28,6 +28,10 @@
 
     npm run account:create -- create-member user@example.com
 
+忘记账号密码时，在运行工作台的同一台电脑上运行以下命令；命令会生成一次性临时密码，用户下次登录时必须立即修改：
+
+    npm run account:create -- reset-password user@example.com
+
 运行当前自动化测试：
 
     npm test

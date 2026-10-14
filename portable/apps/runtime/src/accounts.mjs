@@ -34,6 +34,7 @@ function validateDocument(value) {
       || typeof user.passwordHash !== "string"
       || !/^[A-Za-z0-9_-]{43}$/.test(user.passwordHash)
       || (user.mustChangePassword !== undefined && typeof user.mustChangePassword !== "boolean")
+      || (user.credentialVersion !== undefined && (!Number.isSafeInteger(user.credentialVersion) || user.credentialVersion < 1))
       || typeof user.createdAt !== "string") {
       throw new Error("All Round AI account store contains an invalid account record");
     }
@@ -124,6 +125,7 @@ export async function createAccountStore(filePath) {
           salt: salt.toString("base64url"),
           passwordHash: passwordHash.toString("base64url"),
           mustChangePassword: true,
+          credentialVersion: 1,
           createdAt: new Date().toISOString(),
         };
         document.users.push(user);
@@ -145,7 +147,12 @@ export async function createAccountStore(filePath) {
       const actual = await scrypt(password, salt, HASH_BYTES, SCRYPT_OPTIONS);
       const matches = timingSafeEqual(actual, expected);
       if (!user || !matches) return { ok: false, status: 401 };
-      return { ok: true, user: publicUser(user), context: null, landing: "/" };
+      return {
+        ok: true,
+        user: publicUser(user),
+        context: { credentialVersion: user.credentialVersion ?? 1 },
+        landing: "/",
+      };
     },
     async changePassword(userId, currentPassword, newPassword) {
       if (typeof userId !== "string" || typeof currentPassword !== "string" || currentPassword.length > 1024
@@ -166,11 +173,40 @@ export async function createAccountStore(filePath) {
         user.salt = newSalt.toString("base64url");
         user.passwordHash = passwordHash.toString("base64url");
         user.mustChangePassword = false;
+        user.credentialVersion = (user.credentialVersion ?? 1) + 1;
         await writeStore(document);
-        return { ok: true, user: publicUser(user) };
+        return { ok: true, user: publicUser(user), credentialVersion: user.credentialVersion };
       });
       pendingWrite = operation.catch(() => {});
       return operation;
+    },
+    async resetPassword(rawUsername, password) {
+      const username = normalizeUsername(rawUsername);
+      if (!username) throw new TypeError("账号必须是有效邮箱或国际格式手机号");
+      if (typeof password !== "string" || [...password].length < 12 || password.length > 1024) {
+        throw new TypeError("密码长度必须为 12 至 1024 个字符");
+      }
+      const operation = pendingWrite.then(async () => {
+        const document = await readStore();
+        const user = document.users.find((candidate) => candidate.username === username);
+        if (!user) throw new Error("All Round AI account was not found");
+        const salt = randomBytes(16);
+        const passwordHash = await scrypt(password, salt, HASH_BYTES, SCRYPT_OPTIONS);
+        user.salt = salt.toString("base64url");
+        user.passwordHash = passwordHash.toString("base64url");
+        user.mustChangePassword = true;
+        user.credentialVersion = (user.credentialVersion ?? 1) + 1;
+        await writeStore(document);
+        return publicUser(user);
+      });
+      pendingWrite = operation.catch(() => {});
+      return operation;
+    },
+    async isSessionValid(userId, credentialVersion) {
+      if (typeof userId !== "string" || !Number.isSafeInteger(credentialVersion)) return false;
+      const document = await readStore();
+      const user = document.users.find((candidate) => candidate.id === userId);
+      return Boolean(user && (user.credentialVersion ?? 1) === credentialVersion);
     },
   });
 }
@@ -181,7 +217,13 @@ export function createAccountProvider(store) {
   }
   const provider = ({ user, password }) => store.authenticate(user, password);
   provider.status = async () => ({ configured: true, setupRequired: (await store.count()) === 0 });
-  provider.changePassword = (userId, currentPassword, newPassword) =>
-    store.changePassword(userId, currentPassword, newPassword);
+  provider.changePassword = async (userId, currentPassword, newPassword) => {
+    const result = await store.changePassword(userId, currentPassword, newPassword);
+    return result.ok
+      ? { ok: true, user: result.user, context: { credentialVersion: result.credentialVersion } }
+      : result;
+  };
+  provider.isSessionValid = (userId, credentialVersion) =>
+    store.isSessionValid(userId, credentialVersion);
   return provider;
 }

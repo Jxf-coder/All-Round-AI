@@ -109,7 +109,7 @@ export async function startLocalRuntime(options = {}) {
     }
     if (await auth.handle(request, response)) return;
     const requestUrl = new URL(request.url, "http://127.0.0.1");
-    if (auth.enabled && isProtectedPage(requestUrl.pathname) && !auth.hasSession(request)) {
+    if (auth.enabled && isProtectedPage(requestUrl.pathname) && !(await auth.sessionIsValid(request))) {
       response.writeHead(302, { "cache-control": "no-store", location: "/login?next=" + encodeURIComponent(requestUrl.pathname + requestUrl.search) });
       response.end();
       return;

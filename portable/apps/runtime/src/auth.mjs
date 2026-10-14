@@ -150,6 +150,25 @@ export function createLocalAuth(options = {}) {
     }
   };
   const hasSession = (request) => Boolean(readSession(request));
+  async function sessionIsValid(request) {
+    const id = cookie(request);
+    const session = id ? sessions.get(id) : null;
+    if (!session || session.expiresAt <= Date.now()) {
+      if (id) sessions.delete(id);
+      return false;
+    }
+    const version = session.context?.credentialVersion;
+    if (Number.isSafeInteger(version) && typeof provider?.isSessionValid === "function") {
+      try {
+        if (await provider.isSessionValid(session.user.id, version)) return true;
+      } catch {
+        return false;
+      }
+      sessions.delete(id);
+      return false;
+    }
+    return true;
+  }
 
   async function handle(request, response) {
     const pathname = new URL(request.url, "http://127.0.0.1").pathname;
@@ -262,7 +281,7 @@ export function createLocalAuth(options = {}) {
         return true;
       }
       const currentSession = readSession(request);
-      if (!currentSession) {
+      if (!currentSession || !(await sessionIsValid(request))) {
         json(response, 401, { error: "登录状态已失效，请重新登录" });
         return true;
       }
@@ -309,7 +328,7 @@ export function createLocalAuth(options = {}) {
       const id = randomBytes(32).toString("base64url");
       sessions.set(id, {
         user: identity,
-        context: null,
+        context: result.context ?? { credentialVersion: result.credentialVersion },
         expiresAt: Date.now() + sessionTtlMs,
       });
       json(response, 200, { ok: true, user: identity }, {
@@ -322,7 +341,7 @@ export function createLocalAuth(options = {}) {
         json(response, 405, { error: "Method not allowed" }, { allow: "GET" });
         return true;
       }
-      const session = readSession(request);
+      const session = (await sessionIsValid(request)) ? readSession(request) : null;
       json(response, session ? 200 : 401, session
         ? { ok: true, user: session.user }
         : { error: "未登录" });
@@ -351,6 +370,7 @@ export function createLocalAuth(options = {}) {
     enabled: Boolean(provider),
     handle,
     hasSession,
+    sessionIsValid,
     mustChangePassword(request) {
       return readSession(request)?.user.mustChangePassword === true;
     },

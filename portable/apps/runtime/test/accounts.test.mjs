@@ -212,11 +212,42 @@ test("account setup command provisions an admin without putting a password in it
     });
     assert.equal(newLogin.status, 200);
     assert.equal((await newLogin.json()).user.mustChangePassword, false);
+    const activeCookie = newLogin.headers.get("set-cookie").split(";")[0];
     const anonymousChange = await fetch(`${runtime.url}/api/auth/change-password`, {
       method: "POST", headers: { "content-type": "application/json", origin: runtime.url },
       body: JSON.stringify({ currentPassword: password, newPassword: changedPassword }),
     });
     assert.equal(anonymousChange.status, 401);
+
+    const resetResult = spawnSync(process.execPath, [cliPath, "reset-password", "OWNER@example.test"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ALLROUND_AI_DATA_DIR: dataDirectory,
+        LOCALAPPDATA: temporaryRoot,
+      },
+      windowsHide: true,
+    });
+    assert.equal(resetResult.status, 0, resetResult.stderr);
+    assert.match(resetResult.stdout, /account password reset/);
+    assert.match(resetResult.stdout, /must change this password at the next login/);
+    const temporaryPassword = /Temporary password: ([A-Za-z0-9_-]{32})/.exec(resetResult.stdout)?.[1];
+    assert.ok(temporaryPassword);
+    assert.equal((await fetch(`${runtime.url}/api/auth/me`, { headers: { cookie: activeCookie } })).status, 401);
+    assert.equal((await fetch(`${runtime.url}/`, { headers: { cookie: activeCookie }, redirect: "manual" })).status, 302);
+    const beforeResetPassword = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST", headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "owner@example.test", password: changedPassword }),
+    });
+    assert.equal(beforeResetPassword.status, 401);
+    const resetLogin = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST", headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "owner@example.test", password: temporaryPassword }),
+    });
+    assert.equal(resetLogin.status, 200);
+    assert.equal((await resetLogin.json()).user.mustChangePassword, true);
+    assert.equal((await readFile(path.join(dataDirectory, "config", "accounts.json"), "utf8"))
+      .includes(temporaryPassword), false);
 
     const memberResult = spawnSync(process.execPath, [cliPath, "create-member", "+8613800138000"], {
       encoding: "utf8",
