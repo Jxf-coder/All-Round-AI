@@ -171,7 +171,23 @@ test("account setup command provisions an admin without putting a password in it
     assert.match(forcedChange.headers.get("location"), /^\/change-password\?next=/);
     const changePage = await fetch(`${runtime.url}/change-password`, { headers: { cookie } });
     assert.equal(changePage.status, 200);
-    assert.match(await changePage.text(), /修改初始密码/);
+    const changePageHtml = await changePage.text();
+    assert.match(changePageHtml, /修改初始密码/);
+    assert.match(changePageHtml, /href="\/login\.css"/);
+    assert.match(changePageHtml, /src="\/change-password\.js"/);
+    const changePageCss = await fetch(`${runtime.url}/login.css`);
+    assert.equal(changePageCss.status, 200);
+    assert.match(changePageCss.headers.get("content-type"), /text\/css/);
+    assert.match(await changePageCss.text(), /\.login-form/);
+    const changePageScript = await fetch(`${runtime.url}/change-password.js`);
+    assert.equal(changePageScript.status, 200);
+    assert.match(changePageScript.headers.get("content-type"), /javascript/);
+    assert.match(await changePageScript.text(), /api\/auth\/change-password/);
+    const changeTrailingSlash = await fetch(`${runtime.url}/change-password/?next=%2F`, {
+      headers: { cookie }, redirect: "manual",
+    });
+    assert.equal(changeTrailingSlash.status, 308);
+    assert.equal(changeTrailingSlash.headers.get("location"), "/change-password?next=%2F");
     const otherLogin = await fetch(`${runtime.url}/api/auth/login`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: runtime.url },
