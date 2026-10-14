@@ -33,6 +33,7 @@ function validateDocument(value) {
       || !/^[A-Za-z0-9_-]{22}$/.test(user.salt)
       || typeof user.passwordHash !== "string"
       || !/^[A-Za-z0-9_-]{43}$/.test(user.passwordHash)
+      || (user.mustChangePassword !== undefined && typeof user.mustChangePassword !== "boolean")
       || typeof user.createdAt !== "string") {
       throw new Error("All Round AI account store contains an invalid account record");
     }
@@ -49,7 +50,7 @@ function publicUser(user) {
     role: user.role,
     roleLabel: user.role === "admin" ? "管理员" : "成员",
     source: "all-round-ai",
-    mustChangePassword: false,
+    mustChangePassword: user.mustChangePassword === true,
   };
 }
 
@@ -122,6 +123,7 @@ export async function createAccountStore(filePath) {
           role,
           salt: salt.toString("base64url"),
           passwordHash: passwordHash.toString("base64url"),
+          mustChangePassword: true,
           createdAt: new Date().toISOString(),
         };
         document.users.push(user);
@@ -145,6 +147,31 @@ export async function createAccountStore(filePath) {
       if (!user || !matches) return { ok: false, status: 401 };
       return { ok: true, user: publicUser(user), context: null, landing: "/" };
     },
+    async changePassword(userId, currentPassword, newPassword) {
+      if (typeof userId !== "string" || typeof currentPassword !== "string" || currentPassword.length > 1024
+        || typeof newPassword !== "string" || [...newPassword].length < 12 || newPassword.length > 1024) {
+        return { ok: false, reason: "invalid" };
+      }
+      const operation = pendingWrite.then(async () => {
+        const document = await readStore();
+        const user = document.users.find((candidate) => candidate.id === userId);
+        if (!user) return { ok: false, reason: "unauthorized" };
+        const salt = Buffer.from(user.salt, "base64url");
+        const expected = Buffer.from(user.passwordHash, "base64url");
+        const actual = await scrypt(currentPassword, salt, HASH_BYTES, SCRYPT_OPTIONS);
+        if (!timingSafeEqual(actual, expected)) return { ok: false, reason: "unauthorized" };
+        if (currentPassword === newPassword) return { ok: false, reason: "same" };
+        const newSalt = randomBytes(16);
+        const passwordHash = await scrypt(newPassword, newSalt, HASH_BYTES, SCRYPT_OPTIONS);
+        user.salt = newSalt.toString("base64url");
+        user.passwordHash = passwordHash.toString("base64url");
+        user.mustChangePassword = false;
+        await writeStore(document);
+        return { ok: true, user: publicUser(user) };
+      });
+      pendingWrite = operation.catch(() => {});
+      return operation;
+    },
   });
 }
 
@@ -154,5 +181,7 @@ export function createAccountProvider(store) {
   }
   const provider = ({ user, password }) => store.authenticate(user, password);
   provider.status = async () => ({ configured: true, setupRequired: (await store.count()) === 0 });
+  provider.changePassword = (userId, currentPassword, newPassword) =>
+    store.changePassword(userId, currentPassword, newPassword);
   return provider;
 }

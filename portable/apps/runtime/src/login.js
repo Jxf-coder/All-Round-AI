@@ -63,7 +63,9 @@ form.addEventListener("submit", (event) => {
       const landing = rawNext && next !== "/" && !apiLanding.startsWith("/workbench/coach/")
         ? next
         : localPath(apiLanding, next);
-      window.location.assign(landing);
+      window.location.assign(data.user?.mustChangePassword
+        ? "/change-password?next=" + encodeURIComponent(landing)
+        : landing);
     } catch {
       error.hidden = false;
       error.textContent = "网络错误，请重试";

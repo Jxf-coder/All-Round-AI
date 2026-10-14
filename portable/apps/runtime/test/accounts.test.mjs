@@ -25,6 +25,7 @@ test("native accounts normalize email and phone, persist only salted password ha
     assert.equal(created.name, "Workspace Owner");
     assert.equal(created.role, "admin");
     assert.equal(created.source, "all-round-ai");
+    assert.equal(created.mustChangePassword, true);
     assert.equal(await store.count(), 1);
     const persisted = await readFile(filePath, "utf8");
     assert.equal(persisted.includes(password), false);
@@ -163,8 +164,59 @@ test("account setup command provisions an admin without putting a password in it
     });
     assert.equal(login.status, 200);
     const cookie = login.headers.get("set-cookie").split(";")[0];
-    const workbench = await fetch(`${runtime.url}/`, { headers: { cookie } });
-    assert.equal(workbench.status, 200);
+    const loginBody = await login.json();
+    assert.equal(loginBody.user.mustChangePassword, true);
+    const forcedChange = await fetch(`${runtime.url}/`, { headers: { cookie }, redirect: "manual" });
+    assert.equal(forcedChange.status, 302);
+    assert.match(forcedChange.headers.get("location"), /^\/change-password\?next=/);
+    const changePage = await fetch(`${runtime.url}/change-password`, { headers: { cookie } });
+    assert.equal(changePage.status, 200);
+    assert.match(await changePage.text(), /修改初始密码/);
+    const otherLogin = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "owner@example.test", password }),
+    });
+    const otherCookie = otherLogin.headers.get("set-cookie").split(";")[0];
+    const wrongCurrent = await fetch(`${runtime.url}/api/auth/change-password`, {
+      method: "POST", headers: { cookie, "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ currentPassword: "incorrect-current-password", newPassword: "new-account-password-2026" }),
+    });
+    assert.equal(wrongCurrent.status, 401);
+    assert.match((await wrongCurrent.json()).error, /当前密码错误/);
+    const shortPassword = await fetch(`${runtime.url}/api/auth/change-password`, {
+      method: "POST", headers: { cookie, "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ currentPassword: password, newPassword: "too-short" }),
+    });
+    assert.equal(shortPassword.status, 400);
+    const changedPassword = "new-account-password-2026";
+    const changed = await fetch(`${runtime.url}/api/auth/change-password`, {
+      method: "POST", headers: { cookie, "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ currentPassword: password, newPassword: changedPassword }),
+    });
+    assert.equal(changed.status, 200);
+    const changedBody = await changed.json();
+    assert.equal(changedBody.user.mustChangePassword, false);
+    assert.equal(JSON.stringify(changedBody).includes(changedPassword), false);
+    const renewedCookie = changed.headers.get("set-cookie").split(";")[0];
+    assert.equal((await fetch(`${runtime.url}/`, { headers: { cookie: renewedCookie } })).status, 200);
+    assert.equal((await fetch(`${runtime.url}/api/auth/me`, { headers: { cookie: otherCookie } })).status, 401);
+    const stalePassword = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST", headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "owner@example.test", password }),
+    });
+    assert.equal(stalePassword.status, 401);
+    const newLogin = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST", headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "owner@example.test", password: changedPassword }),
+    });
+    assert.equal(newLogin.status, 200);
+    assert.equal((await newLogin.json()).user.mustChangePassword, false);
+    const anonymousChange = await fetch(`${runtime.url}/api/auth/change-password`, {
+      method: "POST", headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ currentPassword: password, newPassword: changedPassword }),
+    });
+    assert.equal(anonymousChange.status, 401);
 
     const memberResult = spawnSync(process.execPath, [cliPath, "create-member", "+8613800138000"], {
       encoding: "utf8",

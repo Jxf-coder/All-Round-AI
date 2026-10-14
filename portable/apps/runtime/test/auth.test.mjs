@@ -57,7 +57,7 @@ test("mock provider covers rejected credentials, cookie session, safe landing an
         roleLabel: "管理员",
         source: "all-round-ai",
         avatarUrl: "/avatar/test.png",
-        mustChangePassword: true,
+        mustChangePassword: false,
       },
       landing: "https://outside.example/steal",
       guestOf: "academy_1",
@@ -94,7 +94,7 @@ test("mock provider covers rejected credentials, cookie session, safe landing an
     assert.equal(result.user.name, "Test User");
     assert.equal(result.user.roleLabel, "管理员");
     assert.equal(result.user.avatarUrl, "/avatar/test.png");
-    assert.equal(result.user.mustChangePassword, true);
+    assert.equal(result.user.mustChangePassword, false);
     assert.equal(result.guestOf, "academy_1");
     assert.equal(JSON.stringify(result).includes("never-return-this"), false);
     const setCookie = accepted.headers.get("set-cookie");

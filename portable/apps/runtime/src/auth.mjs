@@ -212,6 +212,71 @@ export function createLocalAuth(options = {}) {
       });
       return true;
     }
+    if (pathname === "/api/auth/change-password") {
+      if (request.method !== "POST") {
+        json(response, 405, { error: "Method not allowed" }, { allow: "POST" });
+        return true;
+      }
+      if (!originAllowed(request)) {
+        json(response, 403, { error: "请求来源无效" });
+        return true;
+      }
+      const currentSession = readSession(request);
+      if (!currentSession) {
+        json(response, 401, { error: "登录状态已失效，请重新登录" });
+        return true;
+      }
+      let body;
+      try {
+        body = await bodyJson(request);
+      } catch (error) {
+        json(response, error.status || 400, { error: error.message || "请求格式错误" });
+        return true;
+      }
+      const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
+      const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+      if ([...newPassword].length < 12 || newPassword.length > 1024) {
+        json(response, 400, { error: "新密码长度必须为 12 至 1024 个字符" });
+        return true;
+      }
+      if (typeof provider?.changePassword !== "function") {
+        json(response, 503, { error: "当前认证服务不支持修改密码" });
+        return true;
+      }
+      let result;
+      try {
+        result = await provider.changePassword(currentSession.user.id, currentPassword, newPassword);
+      } catch {
+        json(response, 502, { error: "密码暂时无法更新，请稍后重试" });
+        return true;
+      }
+      if (!result?.ok) {
+        const status = result?.reason === "invalid" || result?.reason === "same" ? 400 : 401;
+        const message = result?.reason === "same" ? "新密码不能与当前密码相同"
+          : result?.reason === "invalid" ? "密码格式无效"
+            : "当前密码错误";
+        json(response, status, { error: message });
+        return true;
+      }
+      const identity = safeUser(result.user);
+      if (!identity) {
+        json(response, 502, { error: "账户服务返回格式异常" });
+        return true;
+      }
+      for (const [id, session] of sessions) {
+        if (session.user.id === identity.id) sessions.delete(id);
+      }
+      const id = randomBytes(32).toString("base64url");
+      sessions.set(id, {
+        user: identity,
+        context: null,
+        expiresAt: Date.now() + sessionTtlMs,
+      });
+      json(response, 200, { ok: true, user: identity }, {
+        "set-cookie": COOKIE + "=" + id + "; Path=/; HttpOnly; SameSite=Lax",
+      });
+      return true;
+    }
     if (pathname === "/api/auth/me") {
       if (request.method !== "GET") {
         json(response, 405, { error: "Method not allowed" }, { allow: "GET" });
@@ -242,5 +307,12 @@ export function createLocalAuth(options = {}) {
     return false;
   }
 
-  return Object.freeze({ enabled: Boolean(provider), handle, hasSession });
+  return Object.freeze({
+    enabled: Boolean(provider),
+    handle,
+    hasSession,
+    mustChangePassword(request) {
+      return readSession(request)?.user.mustChangePassword === true;
+    },
+  });
 }

@@ -32,6 +32,8 @@ async function serveWorkbench(request, response) {
     ? "workbench.html"
     : pathname === "/login" || pathname === "/login/"
       ? "login.html"
+      : pathname === "/change-password"
+        ? "change-password.html"
       : decodeURIComponent(pathname.slice(1));
   const target = path.resolve(WORKBENCH_ROOT, relative);
   if (target !== WORKBENCH_ROOT && !target.startsWith(`${WORKBENCH_ROOT}${path.sep}`)) {
@@ -63,7 +65,8 @@ async function serveWorkbench(request, response) {
 }
 
 function isProtectedPage(pathname) {
-  return pathname === "/" || pathname === "/workbench" || pathname === "/workbench.html" || pathname.startsWith("/workbench/");
+  return pathname === "/" || pathname === "/workbench" || pathname === "/workbench.html"
+    || pathname.startsWith("/workbench/") || pathname === "/change-password";
 }
 
 function parsePort(value) {
@@ -105,6 +108,14 @@ export async function startLocalRuntime(options = {}) {
     const requestUrl = new URL(request.url, "http://127.0.0.1");
     if (auth.enabled && isProtectedPage(requestUrl.pathname) && !auth.hasSession(request)) {
       response.writeHead(302, { "cache-control": "no-store", location: "/login?next=" + encodeURIComponent(requestUrl.pathname + requestUrl.search) });
+      response.end();
+      return;
+    }
+    if (auth.enabled && auth.mustChangePassword(request) && requestUrl.pathname !== "/change-password") {
+      response.writeHead(302, {
+        "cache-control": "no-store",
+        location: "/change-password?next=" + encodeURIComponent(requestUrl.pathname + requestUrl.search),
+      });
       response.end();
       return;
     }
