@@ -2,6 +2,8 @@ import { randomBytes } from "node:crypto";
 
 const COOKIE = "all_round_ai_session";
 const MAX_BODY = 16 * 1024;
+const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const MAX_ACTIVE_SESSIONS = 1000;
 
 function json(response, status, value, headers = {}) {
   response.writeHead(status, {
@@ -103,11 +105,27 @@ export function createLocalAuth(options = {}) {
   if (provider !== null && typeof provider !== "function") {
     throw new TypeError("Authentication provider must be a function");
   }
+  const sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+  if (!Number.isSafeInteger(sessionTtlMs) || sessionTtlMs < 1) {
+    throw new TypeError("Session TTL must be a positive safe integer");
+  }
   const sessions = new Map();
-  const hasSession = (request) => {
+  const readSession = (request) => {
     const id = cookie(request);
-    return Boolean(id && sessions.has(id));
+    const session = id ? sessions.get(id) : null;
+    if (session && session.expiresAt <= Date.now()) {
+      sessions.delete(id);
+      return null;
+    }
+    return session;
   };
+  const pruneSessions = () => {
+    const now = Date.now();
+    for (const [id, session] of sessions) {
+      if (session.expiresAt <= now) sessions.delete(id);
+    }
+  };
+  const hasSession = (request) => Boolean(readSession(request));
 
   async function handle(request, response) {
     const pathname = new URL(request.url, "http://127.0.0.1").pathname;
@@ -115,7 +133,10 @@ export function createLocalAuth(options = {}) {
       if (request.method !== "GET") {
         json(response, 405, { error: "Method not allowed" }, { allow: "GET" });
       } else {
-        json(response, 200, { configured: Boolean(provider) });
+        const status = typeof provider?.status === "function"
+          ? await provider.status()
+          : { configured: Boolean(provider), setupRequired: false };
+        json(response, 200, status);
       }
       return true;
     }
@@ -167,9 +188,19 @@ export function createLocalAuth(options = {}) {
         json(response, 502, { error: "认证服务返回格式异常" });
         return true;
       }
+      pruneSessions();
+      if (sessions.size >= MAX_ACTIVE_SESSIONS) {
+        json(response, 503, { error: "当前登录会话较多，请稍后重试" });
+        return true;
+      }
       const id = randomBytes(32).toString("base64url");
-      // Upstream session context stays server-side. This process-local store is for local testing only.
-      sessions.set(id, { user: identity, context: result.context ?? null });
+      // Private authentication context stays server-side. Sessions are
+      // intentionally process-local until a shared store is designed.
+      sessions.set(id, {
+        user: identity,
+        context: result.context ?? null,
+        expiresAt: Date.now() + sessionTtlMs,
+      });
       const guestOf = safeGuestOf(result.guestOf);
       json(response, 200, {
         ok: true,
@@ -186,8 +217,7 @@ export function createLocalAuth(options = {}) {
         json(response, 405, { error: "Method not allowed" }, { allow: "GET" });
         return true;
       }
-      const id = cookie(request);
-      const session = id ? sessions.get(id) : null;
+      const session = readSession(request);
       json(response, session ? 200 : 401, session
         ? { ok: true, user: session.user }
         : { error: "未登录" });

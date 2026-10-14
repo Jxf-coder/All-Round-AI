@@ -2,7 +2,7 @@ import { startLocalRuntime } from "./server.mjs";
 
 try {
   const runtime = await startLocalRuntime();
-  process.stdout.write(`All-Round-AI local runtime: ${runtime.url}/health\n`);
+  process.stdout.write(`All-Round-AI local runtime: ${runtime.url}/login\n`);
   let stopping = false;
   const stop = async (signal) => {
     if (stopping) return;

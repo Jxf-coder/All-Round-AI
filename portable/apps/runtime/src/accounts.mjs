@@ -1,0 +1,158 @@
+import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import { access, chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
+
+const scrypt = promisify(scryptCallback);
+const HASH_BYTES = 32;
+const SCRYPT_OPTIONS = { N: 32_768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+const ROLES = new Set(["admin", "member"]);
+const DUMMY_SALT = Buffer.alloc(16, 0x41);
+
+function normalizeUsername(value) {
+  if (typeof value !== "string") return null;
+  const username = value.normalize("NFKC").trim().toLowerCase();
+  if (username.length > 254 || /[\s\u0000-\u001f\u007f]/u.test(username)) return null;
+  const email = /^[^@]+@[^@]+\.[^@.]{2,}$/u.test(username);
+  const phone = /^\+?\d{7,15}$/u.test(username);
+  return email || phone ? username : null;
+}
+
+function validateDocument(value) {
+  if (!value || value.version !== 1 || !Array.isArray(value.users)) {
+    throw new Error("All Round AI account store format is unsupported or damaged");
+  }
+  const usernames = new Set();
+  for (const user of value.users) {
+    if (!user || typeof user !== "object"
+      || typeof user.id !== "string"
+      || normalizeUsername(user.username) !== user.username
+      || typeof user.displayName !== "string"
+      || !ROLES.has(user.role)
+      || typeof user.salt !== "string"
+      || !/^[A-Za-z0-9_-]{22}$/.test(user.salt)
+      || typeof user.passwordHash !== "string"
+      || !/^[A-Za-z0-9_-]{43}$/.test(user.passwordHash)
+      || typeof user.createdAt !== "string") {
+      throw new Error("All Round AI account store contains an invalid account record");
+    }
+    if (usernames.has(user.username)) throw new Error("All Round AI account store contains duplicate accounts");
+    usernames.add(user.username);
+  }
+  return value;
+}
+
+function publicUser(user) {
+  return {
+    id: user.id,
+    name: user.displayName,
+    role: user.role,
+    roleLabel: user.role === "admin" ? "管理员" : "成员",
+    source: "all-round-ai",
+    mustChangePassword: false,
+  };
+}
+
+export async function createAccountStore(filePath) {
+  if (typeof filePath !== "string" || !path.isAbsolute(filePath)) {
+    throw new TypeError("An absolute account store path is required");
+  }
+  let pendingWrite = Promise.resolve();
+
+  async function readStore() {
+    try {
+      return validateDocument(JSON.parse(await readFile(filePath, "utf8")));
+    } catch (error) {
+      if (error.code === "ENOENT") return { version: 1, users: [] };
+      throw error;
+    }
+  }
+
+  async function writeStore(value) {
+    const directory = path.dirname(filePath);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await access(directory, 2);
+    if (process.platform !== "win32") await chmod(directory, 0o700);
+    const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    let handle;
+    try {
+      handle = await open(temporaryPath, "wx", 0o600);
+      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await rename(temporaryPath, filePath);
+      if (process.platform !== "win32") {
+        const directoryHandle = await open(directory, "r");
+        try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+      }
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      await rm(temporaryPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  }
+
+  return Object.freeze({
+    async count() {
+      return (await readStore()).users.length;
+    },
+    async create({ username: rawUsername, password, role = "member", displayName } = {}) {
+      const username = normalizeUsername(rawUsername);
+      if (!username) throw new TypeError("账号必须是有效邮箱或国际格式手机号");
+      if (typeof password !== "string" || [...password].length < 12 || password.length > 1024) {
+        throw new TypeError("密码长度必须为 12 至 1024 个字符");
+      }
+      if (!ROLES.has(role)) throw new TypeError("角色只能是 admin 或 member");
+      const name = typeof displayName === "string" && displayName.trim()
+        ? displayName.trim().slice(0, 100)
+        : username;
+
+      const operation = pendingWrite.then(async () => {
+        const document = await readStore();
+        if (document.users.some((user) => user.username === username)) {
+          throw new Error("All Round AI account already exists");
+        }
+        const salt = randomBytes(16);
+        const passwordHash = await scrypt(password, salt, HASH_BYTES, SCRYPT_OPTIONS);
+        const user = {
+          id: randomUUID(),
+          username,
+          displayName: name,
+          role,
+          salt: salt.toString("base64url"),
+          passwordHash: passwordHash.toString("base64url"),
+          createdAt: new Date().toISOString(),
+        };
+        document.users.push(user);
+        await writeStore(document);
+        return publicUser(user);
+      });
+      pendingWrite = operation.catch(() => {});
+      return operation;
+    },
+    async authenticate(rawUsername, password) {
+      const username = normalizeUsername(rawUsername);
+      if (typeof password !== "string" || password.length > 1024) {
+        return { ok: false, status: 401 };
+      }
+      const document = await readStore();
+      const user = username ? document.users.find((candidate) => candidate.username === username) : null;
+      const salt = user ? Buffer.from(user.salt, "base64url") : DUMMY_SALT;
+      const expected = user ? Buffer.from(user.passwordHash, "base64url") : Buffer.alloc(HASH_BYTES);
+      const actual = await scrypt(password, salt, HASH_BYTES, SCRYPT_OPTIONS);
+      const matches = timingSafeEqual(actual, expected);
+      if (!user || !matches) return { ok: false, status: 401 };
+      return { ok: true, user: publicUser(user), context: null, landing: "/" };
+    },
+  });
+}
+
+export function createAccountProvider(store) {
+  if (!store || typeof store.authenticate !== "function" || typeof store.count !== "function") {
+    throw new TypeError("A valid All Round AI account store is required");
+  }
+  const provider = ({ user, password }) => store.authenticate(user, password);
+  provider.status = async () => ({ configured: true, setupRequired: (await store.count()) === 0 });
+  return provider;
+}

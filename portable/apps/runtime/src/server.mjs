@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { ensureAppDirectories } from "../../../packages/platform/src/directories.mjs";
 import { createAppLogger } from "../../../packages/platform/src/logging.mjs";
+import { createAccountProvider, createAccountStore } from "./accounts.mjs";
 import { createLocalAuth } from "./auth.mjs";
 
 const DEFAULT_PORT = 3141;
@@ -84,7 +85,11 @@ export async function startLocalRuntime(options = {}) {
   const port = parsePort(options.port ?? env.ALLROUND_AI_PORT ?? DEFAULT_PORT);
   const directories = await ensureAppDirectories(options);
   const logger = createAppLogger(path.join(directories.logs, "runtime.jsonl"));
-  const auth = createLocalAuth({ provider: options.authProvider ?? null });
+  const accountStore = options.accountStore ?? await createAccountStore(path.join(directories.config, "accounts.json"));
+  const auth = createLocalAuth({
+    provider: options.authProvider ?? createAccountProvider(accountStore),
+    sessionTtlMs: options.authSessionTtlMs,
+  });
 
   const server = createServer((request, response) => {
     void (async () => {

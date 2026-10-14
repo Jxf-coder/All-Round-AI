@@ -14,6 +14,11 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
   let runtime;
   try {
     runtime = await startLocalRuntime({
+      authProvider: async () => ({
+        ok: true,
+        user: { id: "test-user", name: "Test User", role: "admin", source: "all-round-ai" },
+        landing: "/",
+      }),
       env: { ALLROUND_AI_DATA_DIR: dataDirectory },
       home: temporaryRoot,
       port: 0,
@@ -26,7 +31,14 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.equal(health.headers.get("cache-control"), "no-store");
     assert.deepEqual(await health.json(), { service: "all-round-ai", status: "ok" });
 
-    const page = await fetch(`${runtime.url}/`);
+    const login = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "test@example.test", password: "synthetic-test-password" }),
+    });
+    assert.equal(login.status, 200);
+    const sessionCookie = login.headers.get("set-cookie").split(";")[0];
+    const page = await fetch(`${runtime.url}/`, { headers: { cookie: sessionCookie } });
     assert.equal(page.status, 200);
     assert.match(page.headers.get("content-type"), /text\/html/);
     assert.match(page.headers.get("content-security-policy"), /default-src 'self'/);
@@ -48,10 +60,10 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(script.headers.get("content-type"), /javascript/);
     assert.match(await script.text(), /submitMessage/);
 
-    const login = await fetch(`${runtime.url}/login`);
-    assert.equal(login.status, 200);
-    assert.match(login.headers.get("content-type"), /text\/html/);
-    const loginHtml = await login.text();
+    const loginPage = await fetch(`${runtime.url}/login`);
+    assert.equal(loginPage.status, 200);
+    assert.match(loginPage.headers.get("content-type"), /text\/html/);
+    const loginHtml = await loginPage.text();
     assert.match(loginHtml, /All Round AI 工作台/);
     assert.match(loginHtml, /href="login\.css"/);
     assert.match(loginHtml, /src="login\.js"/);
@@ -68,7 +80,7 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(loginScript.headers.get("content-type"), /javascript/);
     assert.match(await loginScript.text(), /api\/auth\/login/);
 
-    const head = await fetch(`${runtime.url}/`, { method: "HEAD" });
+    const head = await fetch(`${runtime.url}/`, { method: "HEAD", headers: { cookie: sessionCookie } });
     assert.equal(head.status, 200);
     assert.equal(await head.text(), "");
 
@@ -116,7 +128,7 @@ test("runtime command starts, answers health checks, logs, and shuts down cleanl
     const runtimeUrl = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`runtime did not start: ${errors}`)), 5000);
       const checkReady = () => {
-        const match = output.match(/All-Round-AI local runtime: (http:\/\/127\.0\.0\.1:\d+)\/health/);
+        const match = output.match(/All-Round-AI local runtime: (http:\/\/127\.0\.0\.1:\d+)\/login/);
         if (match) {
           clearTimeout(timer);
           resolve(match[1]);

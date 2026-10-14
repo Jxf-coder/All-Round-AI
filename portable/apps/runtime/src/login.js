@@ -9,9 +9,11 @@ fetch("/api/auth/status", { credentials: "same-origin", cache: "no-store" })
   .then((response) => (response.ok ? response.json() : null))
   .then((status) => {
     if (!notice || !status) return;
-    notice.textContent = status.configured
-      ? "账号将由已配置的认证服务验证。"
-      : "登录服务尚未连接；账号不会转发到外部服务。";
+    notice.textContent = status.setupRequired
+      ? "尚未创建 All Round AI 管理员账号。请先运行：npm run account:create -- create-admin <邮箱或手机号>"
+      : status.configured
+        ? "账号由 All Round AI 本地账户系统验证。"
+        : "All Round AI 登录服务尚未配置。";
   })
   .catch(() => {
     if (notice) notice.textContent = "暂时无法连接本机登录服务。";

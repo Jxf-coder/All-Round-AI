@@ -23,21 +23,23 @@ async function withRuntime(options, callback) {
   }
 }
 
-test("auth defaults to disabled and never forwards credentials", async () => {
+test("fresh install requires an All Round AI admin account and rejects logins", async () => {
   await withRuntime({}, async (runtime) => {
     const status = await fetch(`${runtime.url}/api/auth/status`);
     assert.equal(status.status, 200);
-    assert.deepEqual(await status.json(), { configured: false });
+    assert.deepEqual(await status.json(), { configured: true, setupRequired: true });
 
     const login = await fetch(`${runtime.url}/api/auth/login`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ user: "person@example.test", password: "not-a-real-secret" }),
     });
-    assert.equal(login.status, 503);
-    assert.match((await login.json()).error, /尚未配置/);
+    assert.equal(login.status, 401);
+    assert.deepEqual(await login.json(), { error: "账号或密码错误" });
+    const loginPage = await fetch(`${runtime.url}/login`);
+    assert.match(await loginPage.text(), /All Round AI/);
     const workbench = await fetch(`${runtime.url}/`, { redirect: "manual" });
-    assert.equal(workbench.status, 200);
+    assert.equal(workbench.status, 302);
   });
 });
 
@@ -64,7 +66,7 @@ test("mock provider covers rejected credentials, cookie session, safe landing an
   };
   await withRuntime({ authProvider }, async (runtime) => {
     const status = await fetch(`${runtime.url}/api/auth/status`);
-    assert.deepEqual(await status.json(), { configured: true });
+    assert.deepEqual(await status.json(), { configured: true, setupRequired: false });
 
     const denied = await fetch(`${runtime.url}/api/auth/login`, {
       method: "POST",
@@ -188,4 +190,23 @@ test("authentication failures preserve the 401/502 contract", async () => {
       });
     });
   }
+});
+
+test("native session expires and is removed from the runtime session map", async () => {
+  const authProvider = async () => ({
+    ok: true,
+    user: { id: "expiry-user", name: "Expiry User", role: "member" },
+  });
+  await withRuntime({ authProvider, authSessionTtlMs: 25 }, async (runtime) => {
+    const accepted = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "expiry@example.test", password: "synthetic-password" }),
+    });
+    assert.equal(accepted.status, 200);
+    const cookie = accepted.headers.get("set-cookie").split(";")[0];
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const whoami = await fetch(`${runtime.url}/api/auth/me`, { headers: { cookie } });
+    assert.equal(whoami.status, 401);
+  });
 });

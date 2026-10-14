@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "start": "node portable/apps/runtime/src/main.mjs",
+    "account:create": "node portable/apps/runtime/src/accounts-cli.mjs",
     "test": "node --test \"portable/packages/platform/test/*.test.mjs\" \"portable/apps/runtime/test/*.test.mjs\"",
     "test:platform": "node --test \"portable/packages/platform/test/*.test.mjs\" \"portable/apps/runtime/test/*.test.mjs\""
   }
