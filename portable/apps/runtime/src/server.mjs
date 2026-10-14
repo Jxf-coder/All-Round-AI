@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { ensureAppDirectories } from "../../../packages/platform/src/directories.mjs";
 import { createAppLogger } from "../../../packages/platform/src/logging.mjs";
+import { createLocalAuth } from "./auth.mjs";
 
 const DEFAULT_PORT = 3141;
 const WORKBENCH_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -60,6 +61,10 @@ async function serveWorkbench(request, response) {
   return true;
 }
 
+function isProtectedPage(pathname) {
+  return pathname === "/" || pathname === "/workbench" || pathname === "/workbench.html" || pathname.startsWith("/workbench/");
+}
+
 function parsePort(value) {
   const port = Number(value);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -79,6 +84,7 @@ export async function startLocalRuntime(options = {}) {
   const port = parsePort(options.port ?? env.ALLROUND_AI_PORT ?? DEFAULT_PORT);
   const directories = await ensureAppDirectories(options);
   const logger = createAppLogger(path.join(directories.logs, "runtime.jsonl"));
+  const auth = createLocalAuth({ provider: options.authProvider ?? null });
 
   const server = createServer((request, response) => {
     void (async () => {
@@ -88,6 +94,13 @@ export async function startLocalRuntime(options = {}) {
         "content-type": "application/json; charset=utf-8",
       });
       response.end(JSON.stringify({ service: "all-round-ai", status: "ok" }));
+      return;
+    }
+    if (await auth.handle(request, response)) return;
+    const requestUrl = new URL(request.url, "http://127.0.0.1");
+    if (auth.enabled && isProtectedPage(requestUrl.pathname) && !auth.hasSession(request)) {
+      response.writeHead(302, { "cache-control": "no-store", location: "/login?next=" + encodeURIComponent(requestUrl.pathname + requestUrl.search) });
+      response.end();
       return;
     }
     if (await serveWorkbench(request, response)) return;
