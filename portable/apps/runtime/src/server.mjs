@@ -69,6 +69,10 @@ function isProtectedPage(pathname) {
     || pathname.startsWith("/workbench/") || pathname === "/change-password";
 }
 
+function isPublicAuthAsset(pathname) {
+  return pathname === "/login.css" || pathname === "/login.js" || pathname === "/change-password.js";
+}
+
 function parsePort(value) {
   const port = Number(value);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -123,7 +127,7 @@ export async function startLocalRuntime(options = {}) {
       response.end();
       return;
     }
-    if (auth.enabled && auth.mustChangePassword(request) && requestUrl.pathname !== "/change-password") {
+    if (auth.enabled && auth.mustChangePassword(request) && requestUrl.pathname !== "/change-password" && !isPublicAuthAsset(requestUrl.pathname)) {
       response.writeHead(302, {
         "cache-control": "no-store",
         location: "/change-password?next=" + encodeURIComponent(requestUrl.pathname + requestUrl.search),

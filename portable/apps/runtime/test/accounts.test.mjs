@@ -173,13 +173,13 @@ test("account setup command provisions an admin without putting a password in it
     assert.equal(changePage.status, 200);
     const changePageHtml = await changePage.text();
     assert.match(changePageHtml, /修改初始密码/);
-    assert.match(changePageHtml, /href="\/login\.css"/);
-    assert.match(changePageHtml, /src="\/change-password\.js"/);
-    const changePageCss = await fetch(`${runtime.url}/login.css`);
+    assert.match(changePageHtml, /href="login\.css"/);
+    assert.match(changePageHtml, /src="change-password\.js"/);
+    const changePageCss = await fetch(`${runtime.url}/login.css`, { headers: { cookie }, redirect: "manual" });
     assert.equal(changePageCss.status, 200);
     assert.match(changePageCss.headers.get("content-type"), /text\/css/);
     assert.match(await changePageCss.text(), /\.login-form/);
-    const changePageScript = await fetch(`${runtime.url}/change-password.js`);
+    const changePageScript = await fetch(`${runtime.url}/change-password.js`, { headers: { cookie }, redirect: "manual" });
     assert.equal(changePageScript.status, 200);
     assert.match(changePageScript.headers.get("content-type"), /javascript/);
     assert.match(await changePageScript.text(), /api\/auth\/change-password/);
