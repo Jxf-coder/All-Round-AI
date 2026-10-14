@@ -45,7 +45,13 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     const login = await fetch(`${runtime.url}/login`);
     assert.equal(login.status, 200);
     assert.match(login.headers.get("content-type"), /text\/html/);
-    assert.match(await login.text(), /All Round AI 工作台/);
+    const loginHtml = await login.text();
+    assert.match(loginHtml, /All Round AI 工作台/);
+    assert.match(loginHtml, /href="login\.css"/);
+    assert.match(loginHtml, /src="login\.js"/);
+    const trailingSlash = await fetch(`${runtime.url}/login/?next=%2Fworkbench`, { redirect: "manual" });
+    assert.equal(trailingSlash.status, 308);
+    assert.equal(trailingSlash.headers.get("location"), "/login?next=%2Fworkbench");
     const loginStyle = await fetch(`${runtime.url}/login.css`);
     assert.equal(loginStyle.status, 200);
     assert.match(loginStyle.headers.get("content-type"), /text\/css/);

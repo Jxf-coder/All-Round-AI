@@ -16,7 +16,16 @@ const CONTENT_TYPES = new Map([
 
 async function serveWorkbench(request, response) {
   if (request.method !== "GET" && request.method !== "HEAD") return false;
-  const pathname = new URL(request.url, "http://127.0.0.1").pathname;
+  const requestUrl = new URL(request.url, "http://127.0.0.1");
+  const pathname = requestUrl.pathname;
+  if (pathname === "/login/") {
+    response.writeHead(308, {
+      "cache-control": "no-store",
+      location: `/login${requestUrl.search}`,
+    });
+    response.end();
+    return true;
+  }
   const relative = pathname === "/"
     ? "workbench.html"
     : pathname === "/login" || pathname === "/login/"
