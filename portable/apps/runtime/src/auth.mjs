@@ -77,9 +77,15 @@ function safeUser(value) {
     id,
     name: value.name.trim().slice(0, 100),
     role: typeof value.role === "string" ? value.role.slice(0, 40) : "member",
+    ...(typeof value.roleLabel === "string" ? { roleLabel: value.roleLabel.slice(0, 80) } : {}),
     source: ["legacy", "itar", "local"].includes(value.source) ? value.source : "local",
+    ...(typeof value.avatarUrl === "string" ? { avatarUrl: value.avatarUrl.slice(0, 2048) } : {}),
     mustChangePassword: Boolean(value.mustChangePassword),
   };
+}
+
+function safeGuestOf(value) {
+  return typeof value === "string" && /^[a-z0-9_-]{1,40}$/.test(value) ? value : null;
 }
 
 function safePath(value) {
@@ -147,7 +153,9 @@ export function createLocalAuth(options = {}) {
         return true;
       }
       if (!result || result.ok !== true) {
-        const status = [400, 401, 429, 503].includes(result?.status) ? result.status : 401;
+        // Match the source login route: its All Round AI adapter exposes 502 for an
+        // unavailable/malformed upstream; all other credential rejections are 401.
+        const status = result?.status === 502 ? 502 : 401;
         const error = typeof result?.error === "string"
           ? result.error.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 160)
           : "";
@@ -162,10 +170,12 @@ export function createLocalAuth(options = {}) {
       const id = randomBytes(32).toString("base64url");
       // Upstream session context stays server-side. This process-local store is for local testing only.
       sessions.set(id, { user: identity, context: result.context ?? null });
+      const guestOf = safeGuestOf(result.guestOf);
       json(response, 200, {
         ok: true,
         user: identity,
         landing: safePath(result.landing),
+        ...(guestOf ? { guestOf } : {}),
       }, {
         "set-cookie": COOKIE + "=" + id + "; Path=/; HttpOnly; SameSite=Lax",
       });

@@ -48,8 +48,17 @@ test("mock provider covers rejected credentials, cookie session, safe landing an
     if (credentials.password !== "test-only-password") return { ok: false, status: 401 };
     return {
       ok: true,
-      user: { id: "u-1", name: "Test User", role: "admin", source: "local" },
+      user: {
+        id: "u-1",
+        name: "Test User",
+        role: "admin",
+        roleLabel: "管理员",
+        source: "legacy",
+        avatarUrl: "/avatar/test.png",
+        mustChangePassword: true,
+      },
       landing: "https://outside.example/steal",
+      guestOf: "academy_1",
       context: { token: "never-return-this" },
     };
   };
@@ -81,6 +90,10 @@ test("mock provider covers rejected credentials, cookie session, safe landing an
     const result = await accepted.json();
     assert.equal(result.landing, "/");
     assert.equal(result.user.name, "Test User");
+    assert.equal(result.user.roleLabel, "管理员");
+    assert.equal(result.user.avatarUrl, "/avatar/test.png");
+    assert.equal(result.user.mustChangePassword, true);
+    assert.equal(result.guestOf, "academy_1");
     assert.equal(JSON.stringify(result).includes("never-return-this"), false);
     const setCookie = accepted.headers.get("set-cookie");
     assert.match(setCookie, /HttpOnly/);
@@ -153,4 +166,26 @@ test("auth endpoints validate method, content type, JSON body and required field
     });
     assert.equal(malformedCookie.status, 401);
   });
+});
+
+test("authentication failures preserve the source 401/502 contract", async () => {
+  const providers = [
+    ["upstream credential rejection", async () => ({ ok: false, status: 403, error: "账号状态不可用" }), 401, "账号状态不可用"],
+    ["upstream outage", async () => ({ ok: false, status: 502, error: "管理后台服务未启动" }), 502, "管理后台服务未启动"],
+    ["provider exception", async () => { throw new Error("private diagnostic"); }, 502, "认证服务暂时不可用"],
+    ["malformed provider identity", async () => ({ ok: true, user: { id: 3 } }), 502, "认证服务返回格式异常"],
+  ];
+  for (const [name, authProvider, expectedStatus, expectedError] of providers) {
+    await test(name, async () => {
+      await withRuntime({ authProvider }, async (runtime) => {
+        const response = await fetch(`${runtime.url}/api/auth/login`, {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: runtime.url },
+          body: JSON.stringify({ user: "user@example.test", password: "synthetic" }),
+        });
+        assert.equal(response.status, expectedStatus);
+        assert.deepEqual(await response.json(), { error: expectedError });
+      });
+    });
+  }
 });
