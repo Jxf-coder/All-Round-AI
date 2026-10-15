@@ -49,6 +49,8 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(pageHtml, /ALL ROUND AI · AI WORKSPACE/);
     assert.match(pageHtml, /href="workbench\.css"/);
     assert.match(pageHtml, /src="workbench\.js"/);
+    assert.match(pageHtml, /id="panel-view"/);
+    assert.match(pageHtml, /aria-label="人格与记忆"/);
     assert.equal(new URL("workbench.css", `${runtime.url}/`).pathname, "/workbench.css");
 
     const style = await fetch(`${runtime.url}/workbench.css`);
@@ -59,7 +61,10 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     const script = await fetch(`${runtime.url}/workbench.js`);
     assert.equal(script.status, 200);
     assert.match(script.headers.get("content-type"), /javascript/);
-    assert.match(await script.text(), /submitMessage/);
+    const scriptSource = await script.text();
+    assert.match(scriptSource, /submitMessage/);
+    assert.match(scriptSource, /knowledgeAction/);
+    assert.match(scriptSource, /openMemory/);
 
     const loginPage = await fetch(`${runtime.url}/login`);
     assert.equal(loginPage.status, 200);
@@ -733,6 +738,110 @@ test("agent memory is stored per project and injected into the chat turn", async
     assert.match(seen[0][0].content, /\[Agent 记忆 · 系统自动注入\]/u);
     assert.match(seen[0][0].content, /你是内容策划/u);
     assert.deepEqual(seen[0].slice(1), [{ role: "user", content: "今天做什么" }]);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("knowledge cards and gaps are managed per project and injected when relevant", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-knowledge-"));
+  const seen = [];
+  let runtime;
+  try {
+    const recording = {
+      id: "recording",
+      label: "Recording",
+      async listModels() { return [{ id: "recording-1", name: "Recording" }]; },
+      async chat({ messages }) { seen.push(messages); return { content: "ok", finishReason: "stop" }; },
+      async *streamChat({ messages }) {
+        seen.push(messages);
+        yield { delta: "收到" };
+        yield { finishReason: "stop" };
+      },
+    };
+    runtime = await startLocalRuntime({
+      aiProvider: recording,
+      authProvider: async ({ user }) => ({
+        ok: true,
+        user: { id: user, name: user, role: "admin", source: "all-round-ai" },
+        landing: "/",
+      }),
+      env: { ALLROUND_AI_DATA_DIR: path.join(temporaryRoot, "data") },
+      home: temporaryRoot,
+      port: 0,
+    });
+    assert.equal((await fetch(`${runtime.url}/api/knowledge`)).status, 401);
+
+    const login = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "owner@example.test", password: "synthetic-test-password" }),
+    });
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+    const headers = { "content-type": "application/json", origin: runtime.url, cookie };
+    const act = async (payload) => {
+      const response = await fetch(`${runtime.url}/api/knowledge`, {
+        method: "POST", headers, body: JSON.stringify(payload),
+      });
+      return { status: response.status, body: await response.json().catch(() => ({})) };
+    };
+
+    const empty = await (await fetch(`${runtime.url}/api/knowledge`, { headers: { cookie } })).json();
+    assert.deepEqual(empty.cards, []);
+    assert.equal(empty.stats.cards, 0);
+
+    const created = await act({ action: "card", kind: "fact", title: "主推产品", body: "主推产品是折叠彩虹琴。" });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.cards.length, 1);
+    assert.equal(created.body.cards[0].status, "pending");
+    assert.equal(created.body.stats.pending, 1);
+    const cardId = created.body.cards[0].id;
+
+    const confirmed = await act({ action: "cardStatus", id: cardId, status: "confirmed" });
+    assert.equal(confirmed.body.stats.confirmed, 1);
+
+    const gap = await act({ action: "gapAdd", question: "优惠券和会员价能否叠加？" });
+    assert.equal(gap.body.stats.gapsOpen, 1);
+    const gapId = gap.body.gaps[0].id;
+    assert.equal((await act({ action: "gapClose", id: gapId, note: "已写进政策" })).body.stats.gapsClosed, 1);
+    assert.equal((await act({ action: "gapReopen", id: gapId })).body.stats.gapsOpen, 1);
+    // The note field is optional, so an empty input box must be accepted.
+    const noNote = await act({ action: "gapAdd", question: "没有备注的缺口", note: "" });
+    assert.equal(noNote.status, 200);
+    assert.equal(noNote.body.gaps.find((item) => item.question === "没有备注的缺口").note, "");
+
+    // Refusals: unknown action, invalid payload, unknown id, unknown project.
+    assert.deepEqual(await act({ action: "whatever" }), { status: 400, body: { error: "未知的 action" } });
+    assert.equal((await act({ action: "card", kind: "rumour", title: "x", body: "y" })).status, 400);
+    assert.equal((await act({ action: "cardStatus", id: "missing", status: "confirmed" })).status, 404);
+    assert.equal((await act({ action: "card", projectId: "missing", kind: "fact", title: "x", body: "y" })).status, 404);
+    assert.equal((await fetch(`${runtime.url}/api/knowledge?projectId=missing`, { headers: { cookie } })).status, 404);
+
+    const { conversation } = await (await fetch(`${runtime.url}/api/conversations`, {
+      method: "POST", headers, body: "{}",
+    })).json();
+    const ask = async (content) => {
+      const response = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+        method: "POST", headers, body: JSON.stringify({ conversationId: conversation.id, content }),
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+    };
+
+    // A question that matches the card pulls it into the turn...
+    await ask("我们主推产品是什么");
+    assert.equal(seen[0][0].role, "system");
+    assert.match(seen[0][0].content, /## 与本轮相关的知识卡片/u);
+    assert.match(seen[0][0].content, /折叠彩虹琴/u);
+
+    // ...and an unrelated question injects nothing at all.
+    await ask("今天天气如何");
+    assert.deepEqual(seen[1], [
+      { role: "user", content: "我们主推产品是什么" },
+      { role: "assistant", content: "收到" },
+      { role: "user", content: "今天天气如何" },
+    ]);
   } finally {
     if (runtime) await runtime.close().catch(() => {});
     await rm(temporaryRoot, { recursive: true, force: true });

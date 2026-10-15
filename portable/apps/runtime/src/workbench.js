@@ -25,6 +25,7 @@ function isInside(event, element) {
 function startConversation(initialText = "") {
   // Starting from a suggestion, the drawer or the rail begins a new thread
   // rather than appending to the currently open one.
+  ensureAgentView();
   activeConversationId = null;
   if (initialText) prompt.value = initialText;
   prompt.focus();
@@ -120,6 +121,7 @@ function renderHistory(conversations) {
 // view is re-rendered from the API after every turn instead of being assembled
 // locally (which would drift from what the server actually kept).
 async function openConversation(id) {
+  ensureAgentView();
   const response = await apiRequest(`/api/conversations/${encodeURIComponent(id)}`);
   if (!response?.ok) return;
   const { conversation: document_ } = await response.json();
@@ -462,12 +464,17 @@ async function selectProject(id) {
   currentProjectId = id;
   storage.set("projectId", id);
   renderProjectLabel();
-  // The open thread belongs to the previous project, so the view is reset and
-  // the rail is re-read for the new scope.
-  activeConversationId = null;
-  conversation.replaceChildren();
-  welcome.classList.remove("hidden");
-  await loadHistory();
+  // Whatever is on screen belongs to the previous project: the open thread is
+  // dropped and the rail is re-read, and an open panel is re-read in place
+  // rather than left showing the old project's content.
+  if (activePanel === "agent") {
+    activeConversationId = null;
+    conversation.replaceChildren();
+    welcome.classList.remove("hidden");
+    await loadHistory();
+    return;
+  }
+  if (activePanel === "database") await refreshKnowledge();
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +551,285 @@ async function saveMemory() {
   memoryDraft = { soul: payload.soul ?? "", memory: payload.memory ?? "" };
   memoryStatus.textContent = `已保存 ${new Date(payload.updatedAt).toLocaleString()}`;
   renderMemory();
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge panel (rail → 知识库). Knowledge cards are proposed first and only
+// become model context once confirmed, so the list keeps the two states apart;
+// the gap list records what the assistant could not answer.
+// ---------------------------------------------------------------------------
+const panelView = $("#panel-view");
+const panelTitle = $("#panel-title");
+const panelCopy = $("#panel-copy");
+const panelBody = $("#panel-body");
+const composer = $("#composer-form");
+const CARD_KIND_LABELS = { fact: "事实", decision: "决策", preference: "偏好", faq: "问答", method: "方法" };
+const CARD_STATUS_LABELS = { pending: "待确认", confirmed: "已确认", dropped: "已丢弃" };
+
+function element(tag, className, textContent) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (textContent !== undefined) node.textContent = textContent;
+  return node;
+}
+
+function actionButton(label, onClick) {
+  const button = element("button", "knowledge-action", label);
+  button.type = "button";
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function knowledgeStats(stats) {
+  const row = element("div", "knowledge-stats");
+  for (const [label, value] of [
+    ["知识卡", stats.cards],
+    ["待确认", stats.pending],
+    ["已确认", stats.confirmed],
+    ["缺口（未关闭）", stats.gapsOpen],
+    ["已关闭", stats.gapsClosed],
+  ]) {
+    const cell = element("div", "knowledge-stat");
+    cell.append(element("b", null, String(value)), element("span", null, label));
+    row.append(cell);
+  }
+  return row;
+}
+
+function cardNode(card, onChanged) {
+  const node = element("article", "knowledge-card");
+  const head = element("div", "knowledge-card-head");
+  head.append(
+    element("span", `knowledge-kind kind-${card.kind}`, CARD_KIND_LABELS[card.kind] ?? card.kind),
+    element("span", "knowledge-card-title", card.title),
+    element("span", `knowledge-status status-${card.status}`, CARD_STATUS_LABELS[card.status] ?? card.status),
+  );
+  node.append(head, element("p", "knowledge-card-body", card.body));
+  const actions = element("div", "knowledge-card-actions");
+  const send = (action, extra = {}) => async () => {
+    await knowledgeAction({ action, id: card.id, ...extra });
+    await onChanged();
+  };
+  if (card.status !== "confirmed") actions.append(actionButton("确认采纳", () => void send("cardStatus", { status: "confirmed" })()));
+  if (card.status !== "pending") actions.append(actionButton("改回待确认", () => void send("cardStatus", { status: "pending" })()));
+  if (card.status !== "dropped") actions.append(actionButton("丢弃", () => void send("cardStatus", { status: "dropped" })()));
+  actions.append(actionButton("删除", () => void send("cardRemove")()));
+  node.append(actions);
+  return node;
+}
+
+function gapNode(gap, onChanged) {
+  const node = element("article", "knowledge-card");
+  const head = element("div", "knowledge-card-head");
+  head.append(
+    element("span", `knowledge-status gap-${gap.status}`, gap.status === "open" ? "未关闭" : "已关闭"),
+    element("span", "knowledge-card-title", gap.question),
+  );
+  node.append(head);
+  if (gap.note) node.append(element("p", "knowledge-card-body", gap.note));
+  const actions = element("div", "knowledge-card-actions");
+  const send = (action) => async () => {
+    await knowledgeAction({ action, id: gap.id });
+    await onChanged();
+  };
+  actions.append(actionButton(gap.status === "open" ? "关闭缺口" : "重新打开",
+    () => void send(gap.status === "open" ? "gapClose" : "gapReopen")()));
+  node.append(actions);
+  return node;
+}
+
+// A new card is a proposal, which is why the form offers the kind but not the
+// status: confirming is a separate, deliberate step.
+function cardForm(onDone, onCancel) {
+  const form = element("form", "knowledge-form");
+  const kind = element("select", "knowledge-field");
+  kind.setAttribute("aria-label", "知识卡类型");
+  for (const [value, label] of Object.entries(CARD_KIND_LABELS)) {
+    const option = element("option", null, label);
+    option.value = value;
+    kind.append(option);
+  }
+  const title = element("input", "knowledge-field");
+  title.placeholder = "标题，例如：主推产品";
+  title.setAttribute("aria-label", "知识卡标题");
+  const body = element("textarea", "knowledge-field");
+  body.placeholder = "内容，例如：主推产品是折叠彩虹琴。";
+  body.setAttribute("aria-label", "知识卡内容");
+  const error = element("p", "knowledge-error");
+  error.hidden = true;
+  const actions = element("div", "knowledge-form-actions");
+  const submit = element("button", "primary-button", "创建");
+  submit.type = "submit";
+  const cancel = element("button", "quiet-button", "取消");
+  cancel.type = "button";
+  cancel.addEventListener("click", onCancel);
+  actions.append(submit, cancel);
+  form.append(kind, title, body, actions, error);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const failure = await knowledgeAction({ action: "card", kind: kind.value, title: title.value, body: body.value });
+    if (failure) {
+      error.hidden = false;
+      error.textContent = failure;
+      return;
+    }
+    await onDone();
+  });
+  return form;
+}
+
+function gapForm(onDone, onCancel) {
+  const form = element("form", "knowledge-form");
+  const question = element("input", "knowledge-field");
+  question.placeholder = "没能回答的问题，例如：优惠券和会员价能否叠加？";
+  question.setAttribute("aria-label", "缺口问题");
+  const note = element("input", "knowledge-field");
+  note.placeholder = "备注（可选）";
+  note.setAttribute("aria-label", "缺口备注");
+  const error = element("p", "knowledge-error");
+  error.hidden = true;
+  const actions = element("div", "knowledge-form-actions");
+  const submit = element("button", "primary-button", "添加");
+  submit.type = "submit";
+  const cancel = element("button", "quiet-button", "取消");
+  cancel.type = "button";
+  cancel.addEventListener("click", onCancel);
+  actions.append(submit, cancel);
+  form.append(question, note, actions, error);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const failure = await knowledgeAction({ action: "gapAdd", question: question.value, note: note.value });
+    if (failure) {
+      error.hidden = false;
+      error.textContent = failure;
+      return;
+    }
+    await onDone();
+  });
+  return form;
+}
+
+let knowledgeState = null;
+
+async function knowledgeAction(payload) {
+  const response = await apiRequest("/api/knowledge", {
+    method: "POST",
+    body: JSON.stringify({ projectId: currentProjectId, ...payload }),
+  });
+  if (!response) return "请先登录";
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) return body.error || "操作失败";
+  knowledgeState = body;
+  return null;
+}
+
+function renderKnowledgeBody() {
+  panelBody.replaceChildren();
+  if (!knowledgeState) {
+    panelBody.append(element("p", "panel-note", "知识库暂时不可用。"));
+    return;
+  }
+  panelBody.append(knowledgeStats(knowledgeState.stats));
+
+  const columns = element("div", "knowledge-columns");
+
+  const cardBlock = element("section", "knowledge-block");
+  const cardHead = element("div", "knowledge-block-head");
+  cardHead.append(element("h3", null, "知识卡"));
+  const cardList = element("div", "knowledge-list");
+  const addCard = element("button", "quiet-button", "＋ 新建知识卡");
+  addCard.type = "button";
+  addCard.addEventListener("click", () => {
+    cardHead.hidden = true;
+    const form = cardForm(refreshKnowledge, () => { cardHead.hidden = false; form.remove(); });
+    cardList.prepend(form);
+    form.querySelector("input").focus();
+  });
+  cardHead.append(addCard);
+  if (!knowledgeState.cards.length) {
+    cardList.append(element("p", "knowledge-empty", "还没有知识卡。确认过的卡片会在提问时按关键词带进上下文。"));
+  }
+  for (const card of knowledgeState.cards) cardList.append(cardNode(card, refreshKnowledge));
+  cardBlock.append(cardHead, cardList);
+
+  const gapBlock = element("section", "knowledge-block");
+  const gapHead = element("div", "knowledge-block-head");
+  gapHead.append(element("h3", null, "缺口清单"));
+  const gapList = element("div", "knowledge-list");
+  const addGap = element("button", "quiet-button", "＋ 新建缺口");
+  addGap.type = "button";
+  addGap.addEventListener("click", () => {
+    gapHead.hidden = true;
+    const form = gapForm(refreshKnowledge, () => { gapHead.hidden = false; form.remove(); });
+    gapList.prepend(form);
+    form.querySelector("input").focus();
+  });
+  gapHead.append(addGap);
+  if (!knowledgeState.gaps.length) {
+    gapList.append(element("p", "knowledge-empty", "还没有缺口。把答不上来的问题记在这里，补齐后关闭。"));
+  }
+  for (const gap of knowledgeState.gaps) gapList.append(gapNode(gap, refreshKnowledge));
+  gapBlock.append(gapHead, gapList);
+
+  columns.append(cardBlock, gapBlock);
+  panelBody.append(columns);
+  panelBody.append(element("p", "panel-note", "当前只有知识卡与缺口清单：来源条目索引、问答来源记录与交接包导出尚未迁移。"));
+}
+
+async function refreshKnowledge() {
+  let response;
+  try {
+    response = await apiRequest(`/api/knowledge?projectId=${encodeURIComponent(currentProjectId ?? "")}`);
+  } catch {
+    response = null;
+  }
+  knowledgeState = response?.ok ? await response.json() : null;
+  renderKnowledgeBody();
+}
+
+function renderPlaceholderPanel(label) {
+  knowledgeState = null;
+  panelBody.replaceChildren(element("p", "panel-note",
+    `${label}工作区的完整功能正在按阶段迁移；此原型先验证工作台导航、项目与知识框架。`));
+}
+
+// Switching between the chat view and a rail panel swaps what the main area
+// shows; the composer only belongs to the chat.
+// Which view the main area is showing, so switching project can refresh it
+// instead of leaving the previous project's panel on screen.
+let activePanel = "agent";
+
+function showAgentView() {
+  activePanel = "agent";
+  panelView.hidden = true;
+  conversation.hidden = false;
+  composer.hidden = false;
+  welcome.classList.remove("hidden");
+  conversation.replaceChildren();
+  activeConversationId = null;
+}
+
+function showPanelView(panel, label) {
+  activePanel = panel;
+  panelView.hidden = false;
+  conversation.hidden = true;
+  composer.hidden = true;
+  welcome.classList.add("hidden");
+  panelTitle.textContent = label;
+  if (panel === "database") {
+    panelCopy.textContent = '只把"已确认"的知识卡喂给模型：每次提问按关键词匹配，最多带上 3 张。';
+    knowledgeState = null;
+    renderKnowledgeBody();
+    void refreshKnowledge();
+    return;
+  }
+  panelCopy.textContent = "";
+  renderPlaceholderPanel(label);
+}
+
+// Anything that belongs to the chat brings the main area back to it first.
+function ensureAgentView() {
+  if (!panelView.hidden) showAgentView();
 }
 
 // Consumes the /api/ai/chat/stream SSE endpoint. The server owns the exchange
@@ -713,30 +999,19 @@ document.querySelectorAll(".rail-item").forEach((button) => button.addEventListe
   const label = button.querySelector(".rail-label").textContent;
   const panel = button.dataset.panel;
   $("#current-section").textContent = label;
-  if (panel === "agent") { welcome.classList.remove("hidden"); conversation.replaceChildren(); activeConversationId = null; }
-  else {
-    welcome.classList.add("hidden");
-    conversation.replaceChildren();
-    const notice = document.createElement("div");
-    notice.className = "message assistant-message";
-    notice.textContent = `${label}工作区的完整功能正在按阶段迁移；此原型先验证工作台导航和视觉框架。`;
-    conversation.append(notice);
-  }
+  // The rail switches the main area: Agent is the chat, 知识库 is real, and the
+  // rest still say plainly that they are not migrated.
+  if (panel === "agent") showAgentView();
+  else showPanelView(panel, label);
   if (matchMedia("(max-width: 640px)").matches) rail.classList.remove("mobile-open");
 }));
 document.querySelectorAll(".top-tab").forEach((button) => button.addEventListener("click", () => {
   document.querySelectorAll(".top-tab").forEach((tab) => tab.classList.toggle("active", tab === button));
   const isOps = button.dataset.mode === "ops";
+  document.querySelectorAll(".rail-item").forEach((item) => item.classList.toggle("active", !isOps && item.dataset.panel === "agent"));
   $("#current-section").textContent = isOps ? "经营台" : "Agent";
-  welcome.classList.toggle("hidden", isOps);
-  conversation.replaceChildren();
-  activeConversationId = null;
-  if (isOps) {
-    const notice = document.createElement("div");
-    notice.className = "message assistant-message";
-    notice.textContent = "经营台界面正在按阶段迁移；当前可核验顶栏模式切换与界面框架。";
-    conversation.append(notice);
-  }
+  if (isOps) showPanelView("ops", "经营台");
+  else showAgentView();
 }));
 
 // The project scope has to be known before the rail is read, so bootstrapping

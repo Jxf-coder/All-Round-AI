@@ -13,6 +13,7 @@ import { createConversationStore } from "./conversations.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
+import { buildKnowledgeBlock, createKnowledgeStore } from "./knowledge.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
@@ -153,6 +154,8 @@ export async function startLocalRuntime(options = {}) {
     ?? await createProjectStore(path.join(directories.config, "projects.json"));
   const memoryStore = options.memoryStore
     ?? await createMemoryStore(path.join(directories.config, "memory.json"));
+  const knowledgeStore = options.knowledgeStore
+    ?? await createKnowledgeStore(path.join(directories.config, "knowledge.json"));
 
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
@@ -344,12 +347,17 @@ export async function startLocalRuntime(options = {}) {
     // The stored conversation is the single source of truth for context, so the
     // client cannot disagree with what was actually said.
     const conversation = await conversationStore.get(ownerId, conversationId);
-    const memory = await memoryStore.get(conversation.projectId ?? await projectStore.defaultRootId());
-    const memoryBlock = buildMemoryBlock(memory);
-    const messages = [
-      ...(memoryBlock ? [{ role: "system", content: memoryBlock }] : []),
-      ...selectContextMessages(conversation.messages),
-    ];
+    const projectId = conversation.projectId ?? await projectStore.defaultRootId();
+    const context = selectContextMessages(conversation.messages);
+    const question = context.at(-1)?.content ?? "";
+    // Knowledge is retrieved per turn: only cards that match this question are
+    // replayed, and only confirmed ones (a pending proposal is not context yet).
+    const [memory, cards] = await Promise.all([
+      memoryStore.get(projectId),
+      knowledgeStore.retrieve(projectId, question),
+    ]);
+    const block = [buildMemoryBlock(memory), buildKnowledgeBlock(cards)].filter(Boolean).join("\n\n");
+    const messages = [...(block ? [{ role: "system", content: block }] : []), ...context];
     if (messages.at(-1)?.role !== "user") {
       json(ctx.response, 400, { error: "没有可回复的消息" });
       return true;
@@ -472,6 +480,72 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, 200, await memoryStore.save(projectId, { soul: body.soul, memory: body.memory }));
     } catch (error) {
       json(ctx.response, 400, { error: error.message || "记忆保存失败" });
+    }
+    return true;
+  });
+
+  // Project knowledge: 知识卡 and 缺口清单. The reference uses one action-based
+  // POST for every mutation; that shape is kept here, but each response carries
+  // the refreshed state so the UI does not need a follow-up read.
+  router.get("/api/knowledge", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const defaultProjectId = await projectStore.defaultRootId();
+    const requested = ctx.url.searchParams.get("projectId");
+    if (requested && !(await projectStore.get(requested))) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    json(ctx.response, 200, await knowledgeStore.list(requested || defaultProjectId));
+    return true;
+  });
+
+  router.post("/api/knowledge", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx, { maxBytes: 64 * 1024 });
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const defaultProjectId = await projectStore.defaultRootId();
+    const projectId = typeof body.projectId === "string" && body.projectId ? body.projectId : defaultProjectId;
+    if (!(await projectStore.get(projectId))) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    try {
+      let missing = null;
+      switch (body.action) {
+        case "card":
+          await knowledgeStore.addCard(projectId, body);
+          break;
+        case "cardStatus":
+          missing = await knowledgeStore.setCardStatus(projectId, body.id, body.status) ? null : "知识卡不存在";
+          break;
+        case "cardRemove":
+          missing = await knowledgeStore.removeCard(projectId, body.id) ? null : "知识卡不存在";
+          break;
+        case "gapAdd":
+          await knowledgeStore.addGap(projectId, body);
+          break;
+        case "gapClose":
+          missing = await knowledgeStore.setGapStatus(projectId, body.id, "closed", body.note) ? null : "缺口不存在";
+          break;
+        case "gapReopen":
+          missing = await knowledgeStore.setGapStatus(projectId, body.id, "open", body.note) ? null : "缺口不存在";
+          break;
+        default:
+          json(ctx.response, 400, { error: "未知的 action" });
+          return true;
+      }
+      if (missing) {
+        json(ctx.response, 404, { error: missing });
+        return true;
+      }
+      json(ctx.response, 200, { action: body.action, ...(await knowledgeStore.list(projectId)) });
+    } catch (error) {
+      json(ctx.response, 400, { error: error.message || "知识库操作失败" });
     }
     return true;
   });

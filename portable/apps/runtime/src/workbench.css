@@ -104,3 +104,50 @@ html.dark .memory-tab.active{color:var(--ink);border-bottom-color:#6c84ff}
 html.dark .memory-tabs,html.dark .memory-footer{border-color:var(--hairline)}
 html.dark .memory-editor{background:#0f1a2c;color:var(--ink);border-color:rgba(255,255,255,.1)}
 html.dark .memory-status{color:#d0def87a}
+
+/* Rail panels: the main area shows either the chat or a section view. */
+.panel-view{position:absolute;top:72px;bottom:24px;left:50%;transform:translateX(-50%);width:min(760px,calc(100% - 60px));overflow:auto;display:flex;flex-direction:column;gap:12px;padding-bottom:8px}
+.panel-view[hidden],.conversation[hidden],.composer-wrap[hidden]{display:none}
+.panel-head{display:flex;flex-direction:column;gap:5px}
+.panel-title{margin:0;font-size:14px;font-weight:600}
+.panel-copy{margin:0;color:var(--muted);font-size:11px;line-height:1.6}
+.panel-note{margin:0;color:#9ca7b5;font-size:10px;line-height:1.6}
+.knowledge-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.knowledge-stat{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border:1px solid var(--hairline);border-radius:10px;background:#ffffffb0}
+.knowledge-stat b{font-size:15px}
+.knowledge-stat span{color:#8a97a8;font-size:9px}
+.knowledge-columns{display:grid;grid-template-columns:1.15fr .85fr;gap:12px;align-items:start}
+.knowledge-block{display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid var(--hairline);border-radius:12px;background:#ffffff8c}
+.knowledge-block-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.knowledge-block-head[hidden]{display:none}
+.knowledge-block-head h3{margin:0;font-size:12px;font-weight:600}
+.knowledge-list{display:flex;flex-direction:column;gap:8px}
+.knowledge-empty{margin:0;padding:14px 10px;color:#9aa5b3;font-size:10px;text-align:center}
+.knowledge-card{display:flex;flex-direction:column;gap:7px;padding:10px;border:1px solid var(--hairline);border-radius:10px;background:#fff}
+.knowledge-card-head{display:flex;align-items:center;gap:7px}
+.knowledge-card-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600}
+.knowledge-card-body{margin:0;color:#5c6b7f;font-size:11px;line-height:1.65;overflow-wrap:anywhere;white-space:pre-wrap}
+.knowledge-kind{padding:2px 6px;border-radius:6px;background:rgba(10,24,46,.06);color:#5c6b7f;font-size:9px}
+.knowledge-status{padding:2px 6px;border-radius:6px;font-size:9px}
+.status-pending{background:rgba(240,169,45,.16);color:#a9701a}
+.status-confirmed{background:rgba(35,168,110,.16);color:#1c7d53}
+.status-dropped{background:rgba(10,24,46,.07);color:#8a96a5}
+.gap-open{background:rgba(217,59,52,.14);color:#b8322b}
+.gap-closed{background:rgba(35,168,110,.16);color:#1c7d53}
+.knowledge-card-actions{display:flex;flex-wrap:wrap;gap:6px}
+.knowledge-action{padding:3px 8px;border:1px solid var(--hairline);border-radius:7px;background:transparent;color:#8290a1;font-family:inherit;font-size:10px;cursor:pointer}
+.knowledge-action:hover{background:var(--chip);color:var(--ink)}
+.knowledge-form{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px dashed var(--hairline);border-radius:10px;background:#ffffff8c}
+.knowledge-field{padding:7px 9px;border:1px solid var(--hairline);border-radius:8px;background:#fff;color:var(--ink);font-family:inherit;font-size:11px}
+.knowledge-field:focus{outline:none;border-color:#a8b6ff}
+textarea.knowledge-field{min-height:64px;resize:vertical}
+.knowledge-form-actions{display:flex;gap:6px}
+.knowledge-error{margin:0;color:#d93b34;font-size:10px}
+html.dark .panel-copy,html.dark .panel-note,html.dark .knowledge-empty,html.dark .knowledge-stat span{color:#d0def87a}
+html.dark .knowledge-stat,html.dark .knowledge-block,html.dark .knowledge-card,html.dark .knowledge-form{background:#16253ba6;border-color:var(--hairline)}
+html.dark .knowledge-card-body{color:#e8effcb8}
+html.dark .knowledge-kind{background:rgba(255,255,255,.08);color:#d0def87a}
+html.dark .knowledge-action{color:#d0def87a;border-color:rgba(255,255,255,.1)}
+html.dark .knowledge-field{background:#0f1a2c;color:var(--ink);border-color:rgba(255,255,255,.1)}
+@media(max-width:900px){.knowledge-columns{grid-template-columns:1fr}.knowledge-stats{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:640px){.panel-view{top:56px;width:calc(100% - 25px)}}
