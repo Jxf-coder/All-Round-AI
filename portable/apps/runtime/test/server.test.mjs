@@ -482,8 +482,10 @@ test("conversation history is persisted per account through the API", async () =
     assert.equal((await fetch(`${runtime.url}/api/conversations`)).status, 401);
 
     const owner = await login("owner@example.test");
-    assert.deepEqual(await (await fetch(`${runtime.url}/api/conversations`, { headers: { cookie: owner } })).json(),
-      { conversations: [] });
+    const initial = await (await fetch(`${runtime.url}/api/conversations`, { headers: { cookie: owner } })).json();
+    assert.deepEqual(initial.conversations, []);
+    // Without a projectId the default company root is used.
+    assert.equal(typeof initial.projectId, "string");
 
     const created = await fetch(`${runtime.url}/api/conversations`, {
       method: "POST", headers: jsonHeaders(owner), body: "{}",
@@ -491,6 +493,31 @@ test("conversation history is persisted per account through the API", async () =
     assert.equal(created.status, 201);
     const { conversation } = await created.json();
     assert.equal(conversation.title, "新对话");
+    assert.equal(conversation.projectId, initial.projectId);
+
+    // History is scoped per project: a conversation started in a role is not
+    // listed under the company root, and vice versa.
+    const roleResponse = await fetch(`${runtime.url}/api/projects`, {
+      method: "POST",
+      headers: jsonHeaders(owner),
+      body: JSON.stringify({ name: "新媒体运营", type: "child", parentId: initial.projectId }),
+    });
+    assert.equal(roleResponse.status, 201);
+    const { project: role } = await roleResponse.json();
+    const scoped = await (await fetch(`${runtime.url}/api/conversations`, {
+      method: "POST", headers: jsonHeaders(owner), body: JSON.stringify({ projectId: role.id }),
+    })).json();
+    assert.equal(scoped.conversation.projectId, role.id);
+    const roleList = await (await fetch(`${runtime.url}/api/conversations?projectId=${role.id}`,
+      { headers: { cookie: owner } })).json();
+    assert.deepEqual(roleList.conversations.map((item) => item.id), [scoped.conversation.id]);
+    const rootList = await (await fetch(`${runtime.url}/api/conversations`,
+      { headers: { cookie: owner } })).json();
+    assert.deepEqual(rootList.conversations.map((item) => item.id), [conversation.id]);
+    assert.equal((await fetch(`${runtime.url}/api/conversations?projectId=missing`, { headers: { cookie: owner } })).status, 404);
+    assert.equal((await fetch(`${runtime.url}/api/conversations`, {
+      method: "POST", headers: jsonHeaders(owner), body: JSON.stringify({ projectId: "missing" }),
+    })).status, 400);
 
     const replied = await fetch(`${runtime.url}/api/ai/chat/stream`, {
       method: "POST",
@@ -535,6 +562,69 @@ test("conversation history is persisted per account through the API", async () =
     });
     assert.equal(removed.status, 200);
     assert.equal((await fetch(`${runtime.url}/api/conversations/${conversation.id}`, { headers: { cookie: owner } })).status, 404);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the project tree is seeded, listed and created over the API", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-projects-"));
+  let runtime;
+  try {
+    runtime = await startLocalRuntime({
+      authProvider: async ({ user }) => ({
+        ok: true,
+        user: { id: user, name: user, role: "admin", source: "all-round-ai" },
+        landing: "/",
+      }),
+      env: { ALLROUND_AI_DATA_DIR: path.join(temporaryRoot, "data") },
+      home: temporaryRoot,
+      port: 0,
+    });
+    assert.equal((await fetch(`${runtime.url}/api/projects`)).status, 401);
+
+    const login = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "owner@example.test", password: "synthetic-test-password" }),
+    });
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+    const headers = { "content-type": "application/json", origin: runtime.url, cookie };
+
+    const seeded = await (await fetch(`${runtime.url}/api/projects`, { headers: { cookie } })).json();
+    assert.equal(seeded.projects.length, 1);
+    assert.equal(seeded.tree.length, 1);
+    assert.equal(seeded.defaultProjectId, seeded.projects[0].id);
+    const rootId = seeded.defaultProjectId;
+
+    const createdRole = await fetch(`${runtime.url}/api/projects`, {
+      method: "POST", headers, body: JSON.stringify({ name: "产品经理", type: "child", parentId: rootId }),
+    });
+    assert.equal(createdRole.status, 201);
+    const { project: role } = await createdRole.json();
+    const createdSeat = await fetch(`${runtime.url}/api/projects`, {
+      method: "POST", headers, body: JSON.stringify({ name: "内容策划", type: "seat", parentId: role.id }),
+    });
+    assert.equal(createdSeat.status, 201);
+
+    const after = await (await fetch(`${runtime.url}/api/projects`, { headers: { cookie } })).json();
+    assert.equal(after.projects.length, 3);
+    assert.deepEqual(after.tree[0].children.map((child) => child.name), ["产品经理"]);
+    assert.deepEqual(after.tree[0].children[0].seats.map((seat) => seat.name), ["内容策划"]);
+
+    // Validation failures answer 400 with the reason and write nothing.
+    const invalidName = await fetch(`${runtime.url}/api/projects`, {
+      method: "POST", headers, body: JSON.stringify({ name: "   " }),
+    });
+    assert.equal(invalidName.status, 400);
+    assert.deepEqual(await invalidName.json(), { error: "名称不能为空" });
+    const orphanSeat = await fetch(`${runtime.url}/api/projects`, {
+      method: "POST", headers, body: JSON.stringify({ name: "孤儿岗位", type: "seat", parentId: rootId }),
+    });
+    assert.equal(orphanSeat.status, 400);
+    assert.deepEqual(await orphanSeat.json(), { error: "只能在岗位下创建子岗位" });
+    assert.equal((await (await fetch(`${runtime.url}/api/projects`, { headers: { cookie } })).json()).projects.length, 3);
   } finally {
     if (runtime) await runtime.close().catch(() => {});
     await rm(temporaryRoot, { recursive: true, force: true });

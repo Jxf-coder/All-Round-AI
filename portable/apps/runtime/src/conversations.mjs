@@ -24,6 +24,10 @@ function validateDocument(value) {
       || typeof conversation.title !== "string"
       || !isIsoTimestamp(conversation.createdAt)
       || !isIsoTimestamp(conversation.updatedAt)
+      // projectId arrived with project scoping; documents written before that
+      // have none and are still readable (they count as unassigned).
+      || (conversation.projectId !== undefined && conversation.projectId !== null
+        && typeof conversation.projectId !== "string")
       || !Array.isArray(conversation.messages)) {
       throw new Error("All Round AI conversation store contains an invalid conversation");
     }
@@ -52,6 +56,7 @@ export function conversationTitle(content) {
 function summarize(conversation) {
   return {
     id: conversation.id,
+    projectId: conversation.projectId ?? null,
     title: conversation.title,
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
@@ -66,12 +71,22 @@ export async function createConversationStore(filePath) {
   });
 
   return Object.freeze({
-    async list(ownerId) {
+    // Conversations belong to the project they were started in, so switching
+    // projects switches the history. Records written before project scoping
+    // existed carry no projectId; `unassignedProjectId` decides which project
+    // they are shown under rather than hiding or rewriting them.
+    async list(ownerId, { projectId, unassignedProjectId } = {}) {
       if (typeof ownerId !== "string" || !ownerId) throw new TypeError("A conversation owner is required");
+      const desired = typeof projectId === "string" && projectId ? projectId : null;
       const { conversations } = await store.read();
       return conversations
         .map((conversation, index) => ({ conversation, index }))
         .filter(({ conversation }) => conversation.ownerId === ownerId)
+        .filter(({ conversation }) => {
+          if (!desired) return true;
+          const stored = conversation.projectId ?? unassignedProjectId ?? null;
+          return stored === desired;
+        })
         // Most recently updated first; equally-timestamped entries fall back to
         // insertion order so the listing stays deterministic.
         .sort((left, right) =>
@@ -81,6 +96,10 @@ export async function createConversationStore(filePath) {
     },
     async create(ownerId, options = {}) {
       if (typeof ownerId !== "string" || !ownerId) throw new TypeError("A conversation owner is required");
+      if (options.projectId !== undefined && options.projectId !== null
+        && (typeof options.projectId !== "string" || !options.projectId)) {
+        throw new TypeError("A conversation project must be a non-empty string");
+      }
       const now = new Date().toISOString();
       return store.update((document) => {
         const owned = document.conversations.filter((item) => item.ownerId === ownerId);
@@ -90,6 +109,7 @@ export async function createConversationStore(filePath) {
         const conversation = {
           id: randomUUID(),
           ownerId,
+          projectId: options.projectId ?? null,
           title: typeof options.title === "string" && options.title.trim()
             ? options.title.trim().slice(0, MAX_TITLE_LENGTH)
             : DEFAULT_TITLE,

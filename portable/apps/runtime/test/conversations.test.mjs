@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -83,6 +83,52 @@ test("the trailing answer can be dropped for a retry", async () => {
 
     assert.equal(await store.dropTrailingAssistant("user-1", "missing"), null);
     assert.equal(await store.dropTrailingAssistant("user-2", id), null);
+  });
+});
+
+test("conversations are scoped to the project they were started in", async () => {
+  await withStore(async ({ filePath, store }) => {
+    const inRoot = await store.create("user-1", { projectId: "project-root" });
+    const inRole = await store.create("user-1", { projectId: "project-role" });
+    assert.equal(inRoot.projectId, "project-root");
+    // Without a project filter the whole history is listed (used by the tests
+    // and any future "all conversations" view).
+    assert.equal((await store.list("user-1")).length, 2);
+    assert.deepEqual(
+      (await store.list("user-1", { projectId: "project-root" })).map((item) => item.id),
+      [inRoot.id],
+    );
+    assert.deepEqual(
+      (await store.list("user-1", { projectId: "project-role" })).map((item) => item.id),
+      [inRole.id],
+    );
+    assert.deepEqual(await store.list("user-1", { projectId: "project-empty" }), []);
+
+    // A conversation written before project scoping existed has no projectId;
+    // it is shown under the project named as the unassigned fallback instead of
+    // disappearing, and the stored document is left untouched.
+    const document = JSON.parse(await readFile(filePath, "utf8"));
+    document.conversations.push({
+      id: "legacy",
+      ownerId: "user-1",
+      title: "旧对话",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+    });
+    await writeFile(filePath, JSON.stringify(document), "utf8");
+    const withLegacy = await store.list("user-1", {
+      projectId: "project-root",
+      unassignedProjectId: "project-root",
+    });
+    assert.deepEqual(withLegacy.map((item) => item.id).sort(), ["legacy", inRoot.id].sort());
+    assert.equal((await store.list("user-1", {
+      projectId: "project-role",
+      unassignedProjectId: "project-root",
+    })).length, 1);
+
+    await assert.rejects(store.create("user-1", { projectId: "" }), TypeError);
+    await assert.rejects(store.create("user-1", { projectId: 7 }), TypeError);
   });
 });
 

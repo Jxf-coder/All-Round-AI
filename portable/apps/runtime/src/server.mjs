@@ -11,6 +11,7 @@ import { createLocalAuth } from "./auth.mjs";
 import { createConfigStore } from "./config-store.mjs";
 import { createConversationStore } from "./conversations.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
+import { createProjectStore } from "./projects.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
@@ -146,6 +147,9 @@ export async function startLocalRuntime(options = {}) {
   const aiSettings = options.aiSettings ?? createAiSettings({ configStore, provider: aiProvider });
   const conversationStore = options.conversationStore
     ?? await createConversationStore(path.join(directories.config, "conversations.json"));
+  // Projects scope the chat history, so every conversation lives in one.
+  const projectStore = options.projectStore
+    ?? await createProjectStore(path.join(directories.config, "projects.json"));
 
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
@@ -386,12 +390,61 @@ export async function startLocalRuntime(options = {}) {
     return true;
   });
 
+  // Projects (公司根项目 / 岗位 / 子岗位). They scope chat history; the reference
+  // workbench additionally filters them by tenant and hired roles, which has no
+  // portable equivalent yet, so every signed-in account sees the same tree.
+  router.get("/api/projects", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const [projects, tree, defaultProjectId] = await Promise.all([
+      projectStore.list(),
+      projectStore.tree(),
+      projectStore.defaultRootId(),
+    ]);
+    json(ctx.response, 200, { projects, tree, defaultProjectId });
+    return true;
+  });
+
+  router.post("/api/projects", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    try {
+      const project = await projectStore.create({
+        name: body.name,
+        type: body.type ?? "root",
+        parentId: typeof body.parentId === "string" && body.parentId ? body.parentId : null,
+      });
+      json(ctx.response, 201, { project });
+    } catch (error) {
+      json(ctx.response, 400, { error: error.message || "创建项目失败" });
+    }
+    return true;
+  });
+
   // Conversation history. Documents are scoped to the signed-in account so one
   // user can never read or mutate another user's conversations.
   router.get("/api/conversations", async (ctx) => {
     const actor = await requireActor(ctx);
     if (!actor) return true;
-    json(ctx.response, 200, { conversations: await conversationStore.list(String(actor.id)) });
+    const defaultProjectId = await projectStore.defaultRootId();
+    const requested = ctx.url.searchParams.get("projectId");
+    if (requested && !(await projectStore.get(requested))) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    const projectId = requested || defaultProjectId;
+    json(ctx.response, 200, {
+      projectId,
+      conversations: await conversationStore.list(String(actor.id), {
+        projectId,
+        unassignedProjectId: defaultProjectId,
+      }),
+    });
     return true;
   });
 
@@ -405,7 +458,20 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
       return true;
     }
-    const conversation = await conversationStore.create(String(actor.id), { title: body.title });
+    const projectId = typeof body.projectId === "string" && body.projectId
+      ? body.projectId
+      : await projectStore.defaultRootId();
+    if (!(await projectStore.get(projectId))) {
+      json(ctx.response, 400, { error: "项目不存在" });
+      return true;
+    }
+    let conversation;
+    try {
+      conversation = await conversationStore.create(String(actor.id), { title: body.title, projectId });
+    } catch (error) {
+      json(ctx.response, 400, { error: error.message || "创建对话失败" });
+      return true;
+    }
     json(ctx.response, 201, { conversation });
     return true;
   });
