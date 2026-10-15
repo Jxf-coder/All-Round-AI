@@ -8,8 +8,11 @@ import { createAppLogger } from "../../../packages/platform/src/logging.mjs";
 import { createAccountProvider, createAccountStore } from "./accounts.mjs";
 import { createAuthStateStore } from "./auth-state.mjs";
 import { createLocalAuth } from "./auth.mjs";
+import { createConfigStore } from "./config-store.mjs";
 import { createConversationStore } from "./conversations.mjs";
+import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
+import { createAiSettings } from "./ai/settings.mjs";
 import { createRouter, json, readJsonBody } from "./router.mjs";
 
 const DEFAULT_PORT = 3141;
@@ -133,6 +136,13 @@ export async function startLocalRuntime(options = {}) {
     },
   });
   const aiProvider = options.aiProvider ?? createMockAiProvider();
+  // Settings hold the chosen model plus a provider credential, so they go
+  // through the encrypting config store backed by a per-installation key.
+  const configStore = options.configStore ?? await createConfigStore(
+    path.join(directories.config, "settings.json"),
+    { masterKey: await loadOrCreateMasterKey(path.join(directories.config, "master-key.json")) },
+  );
+  const aiSettings = options.aiSettings ?? createAiSettings({ configStore, provider: aiProvider });
   const conversationStore = options.conversationStore
     ?? await createConversationStore(path.join(directories.config, "conversations.json"));
 
@@ -218,6 +228,37 @@ export async function startLocalRuntime(options = {}) {
     return true;
   });
 
+  // Model and credential settings. Everyone signed in can read them so the
+  // workbench can label the active model; changing them is an admin action
+  // because they are installation-wide.
+  router.get("/api/settings/ai", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    json(ctx.response, 200, await aiSettings.describe());
+    return true;
+  });
+
+  router.put("/api/settings/ai", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    if (actor.role !== "admin") {
+      json(ctx.response, 403, { error: "没有管理员权限" });
+      return true;
+    }
+    let body;
+    try {
+      body = await readJsonBody(ctx.request);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    try {
+      json(ctx.response, 200, await aiSettings.update({ model: body.model, apiKey: body.apiKey }));
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "设置无效" });
+    }
+    return true;
+  });
+
   router.post("/api/ai/chat", async (ctx) => {
     if (!(await requireActor(ctx))) return true;
     let body;
@@ -229,7 +270,8 @@ export async function startLocalRuntime(options = {}) {
     }
     try {
       const result = await aiProvider.chat({
-        model: body.model,
+        // An explicit model wins; otherwise the configured model is the default.
+        model: typeof body.model === "string" && body.model ? body.model : await aiSettings.currentModel(),
         messages: body.messages,
         signal: ctx.signal,
       });

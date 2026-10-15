@@ -143,6 +143,35 @@ test("runtime falls back to the workbench shell for client routes and serves the
     assert.equal(modelPayload.provider, "mock");
     assert.equal(modelPayload.models.length >= 1, true);
 
+    // Model settings: readable by any signed-in account, writable by admins.
+    assert.equal((await fetch(`${runtime.url}/api/settings/ai`)).status, 401);
+    const settings = await fetch(`${runtime.url}/api/settings/ai`, { headers: { cookie } });
+    assert.equal(settings.status, 200);
+    const settingsPayload = await settings.json();
+    assert.equal(settingsPayload.provider, "mock");
+    assert.equal(settingsPayload.apiKeyConfigured, false);
+    assert.equal(typeof settingsPayload.providerLabel, "string");
+
+    const targetModel = settingsPayload.models.at(-1).id;
+    const saved = await fetch(`${runtime.url}/api/settings/ai`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ model: targetModel, apiKey: "sk-test-value" }),
+    });
+    assert.equal(saved.status, 200);
+    const savedPayload = await saved.json();
+    assert.equal(savedPayload.model, targetModel);
+    assert.equal(savedPayload.apiKeyConfigured, true);
+    assert.equal(JSON.stringify(savedPayload).includes("sk-test-value"), false);
+
+    const rejectedModel = await fetch(`${runtime.url}/api/settings/ai`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ model: "no-such-model" }),
+    });
+    assert.equal(rejectedModel.status, 400);
+
+    // The configured model becomes the default for chat requests.
     const chat = await fetch(`${runtime.url}/api/ai/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: runtime.url, cookie },
@@ -150,6 +179,7 @@ test("runtime falls back to the workbench shell for client routes and serves the
     });
     assert.equal(chat.status, 200);
     const chatPayload = await chat.json();
+    assert.equal(chatPayload.model, targetModel);
     assert.equal(chatPayload.finishReason, "stop");
     assert.match(chatPayload.content, /你好/);
 
@@ -183,6 +213,47 @@ test("runtime falls back to the workbench shell for client routes and serves the
     assert.equal(badBody.status, 415);
 
     assert.match(deepRoute.headers.get("x-request-id"), /^[0-9a-f]{32}$/);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("model settings are read-only for members", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-settings-"));
+  let runtime;
+  try {
+    runtime = await startLocalRuntime({
+      authProvider: async () => ({
+        ok: true,
+        user: { id: "member-1", name: "Member", role: "member", source: "all-round-ai" },
+        landing: "/",
+      }),
+      env: { ALLROUND_AI_DATA_DIR: path.join(temporaryRoot, "data") },
+      home: temporaryRoot,
+      port: 0,
+    });
+    const login = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "member@example.test", password: "synthetic-test-password" }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+
+    const readable = await fetch(`${runtime.url}/api/settings/ai`, { headers: { cookie } });
+    assert.equal(readable.status, 200);
+    const current = await readable.json();
+
+    const forbidden = await fetch(`${runtime.url}/api/settings/ai`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ model: current.models.at(-1).id }),
+    });
+    assert.equal(forbidden.status, 403);
+    assert.deepEqual(await forbidden.json(), { error: "没有管理员权限" });
+    // The refused write must not have changed anything.
+    assert.equal((await (await fetch(`${runtime.url}/api/settings/ai`, { headers: { cookie } })).json()).model, current.model);
   } finally {
     if (runtime) await runtime.close().catch(() => {});
     await rm(temporaryRoot, { recursive: true, force: true });

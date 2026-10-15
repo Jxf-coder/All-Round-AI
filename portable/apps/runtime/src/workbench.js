@@ -143,6 +143,89 @@ function appendMessage(className, text = "") {
   return node;
 }
 
+// ---------------------------------------------------------------------------
+// Model picker. The active model is an installation setting read from the
+// settings API; changing it is an admin action, so a refusal is surfaced to the
+// user instead of being silently swallowed.
+// ---------------------------------------------------------------------------
+const modelButton = $("#model-button");
+const modelLabel = $("#model-label");
+const modelMenu = $("#model-menu");
+let aiSettings = null;
+
+function renderModel() {
+  const active = aiSettings?.models.find((model) => model.id === aiSettings.model);
+  modelLabel.textContent = active?.name ?? "选择模型";
+  modelButton.title = aiSettings
+    ? `当前模型：${active?.name ?? aiSettings.model}（${aiSettings.providerLabel}）`
+    : "选择模型";
+}
+
+function closeModelMenu() {
+  modelMenu.hidden = true;
+  modelButton.setAttribute("aria-expanded", "false");
+}
+
+async function loadAiSettings() {
+  let response;
+  try {
+    response = await apiRequest("/api/settings/ai");
+  } catch {
+    return;
+  }
+  if (!response?.ok) return;
+  aiSettings = await response.json();
+  renderModel();
+}
+
+async function selectModel(id) {
+  const response = await apiRequest("/api/settings/ai", {
+    method: "PUT",
+    body: JSON.stringify({ model: id }),
+  });
+  if (!response) return;
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const note = modelMenu.querySelector(".model-note");
+    if (note) note.textContent = payload.error || "无法保存模型设置";
+    return;
+  }
+  aiSettings = payload;
+  renderModel();
+  closeModelMenu();
+}
+
+function openModelMenu() {
+  modelMenu.replaceChildren();
+  if (!aiSettings) {
+    const note = document.createElement("div");
+    note.className = "model-note";
+    note.textContent = "模型列表暂时不可用。";
+    modelMenu.append(note);
+  } else {
+    for (const model of aiSettings.models) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "model-option";
+      option.setAttribute("role", "option");
+      const isActive = model.id === aiSettings.model;
+      option.setAttribute("aria-selected", String(isActive));
+      option.classList.toggle("active", isActive);
+      option.textContent = model.name;
+      option.addEventListener("click", () => void selectModel(model.id));
+      modelMenu.append(option);
+    }
+    const note = document.createElement("div");
+    note.className = "model-note";
+    note.textContent = aiSettings.apiKeyConfigured
+      ? "已保存供应商密钥（加密存储，不会回显）。"
+      : "尚未配置供应商密钥；当前由本地 Mock 提供回复。";
+    modelMenu.append(note);
+  }
+  modelMenu.hidden = false;
+  modelButton.setAttribute("aria-expanded", "true");
+}
+
 // Consumes the /api/ai/chat/stream SSE endpoint and renders deltas as they
 // arrive. Falls back to a plain notice when no provider is reachable, so the
 // prototype never shows a broken conversation.
@@ -216,6 +299,15 @@ prompt.addEventListener("input", () => {
 prompt.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); submitMessage(event); }
 });
+modelButton.addEventListener("click", () => {
+  if (modelMenu.hidden) openModelMenu();
+  else closeModelMenu();
+});
+document.addEventListener("click", (event) => {
+  if (modelMenu.hidden) return;
+  if (modelMenu.contains(event.target) || modelButton.contains(event.target)) return;
+  closeModelMenu();
+});
 document.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => startConversation(button.dataset.prompt)));
 $("#new-agent").addEventListener("click", () => { conversation.replaceChildren(); welcome.classList.remove("hidden"); startConversation(); });
 $("#drawer-start").addEventListener("click", () => startConversation());
@@ -238,7 +330,7 @@ $("#mobile-search").addEventListener("click", openSearch);
 searchModal.addEventListener("click", (event) => { if (event.target === searchModal) searchModal.hidden = true; });
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); openSearch(); }
-  if (event.key === "Escape") { searchModal.hidden = true; drawer.classList.remove("open"); rail.classList.remove("mobile-open"); }
+  if (event.key === "Escape") { searchModal.hidden = true; drawer.classList.remove("open"); rail.classList.remove("mobile-open"); closeModelMenu(); }
 });
 $("#search-input").addEventListener("input", (event) => {
   $(".search-empty").textContent = event.target.value.trim() ? "原型阶段尚未连接 Skill、知识与任务索引。" : "输入关键词开始搜索";
@@ -278,3 +370,5 @@ document.querySelectorAll(".top-tab").forEach((button) => button.addEventListene
 
 // History is loaded from the runtime so the rail reflects persisted threads.
 void loadHistory();
+// The active model label comes from the installation settings.
+void loadAiSettings();

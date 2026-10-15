@@ -37,3 +37,17 @@ html.dark .rail{background:linear-gradient(180deg,rgba(18,35,63,.9),rgba(6,16,31
 html.dark .history-entry.active{background:rgba(108,132,255,.16);color:var(--ink)}
 html.dark .history-delete{color:#d0def87a}
 html.dark .history-delete:hover{background:rgba(255,255,255,.1);color:#ff8a8f}
+
+/* Model picker: anchored above the composer it belongs to. */
+.composer{position:relative}
+.model-menu{position:absolute;left:13px;bottom:54px;min-width:210px;padding:5px;border:1px solid var(--hairline);border-radius:11px;background:#fff;box-shadow:0 12px 34px rgba(10,24,46,.16);z-index:4}
+.model-menu[hidden]{display:none}
+.model-option{display:block;width:100%;padding:8px 10px;border:0;border-radius:8px;background:transparent;color:#46566c;font-size:11px;text-align:left;cursor:pointer}
+.model-option:hover{background:var(--chip)}
+.model-option.active{background:rgba(37,67,255,.09);color:var(--ink);font-weight:600}
+.model-note{padding:7px 10px;color:#9ca7b5;font-size:10px;line-height:1.5}
+html.dark .model-menu{background:#131c2e;border-color:rgba(255,255,255,.1);box-shadow:0 12px 34px rgba(0,0,0,.4)}
+html.dark .model-option{color:#e8effcb8}
+html.dark .model-option:hover{background:rgba(255,255,255,.07)}
+html.dark .model-option.active{background:rgba(108,132,255,.18);color:var(--ink)}
+html.dark .model-note{color:#d0def87a}
