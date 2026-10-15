@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { ensureAppDirectories } from "../../../packages/platform/src/directories.mjs";
 import { createAppLogger } from "../../../packages/platform/src/logging.mjs";
 import { createAccountProvider, createAccountStore } from "./accounts.mjs";
+import { createAuthStateStore } from "./auth-state.mjs";
 import { createLocalAuth } from "./auth.mjs";
 import { createConversationStore } from "./conversations.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
@@ -114,12 +115,22 @@ export async function startLocalRuntime(options = {}) {
   const directories = await ensureAppDirectories(options);
   const logger = createAppLogger(path.join(directories.logs, "runtime.jsonl"));
   const accountStore = options.accountStore ?? await createAccountStore(path.join(directories.config, "accounts.json"));
+  // Session and login-throttle state is hydrated from disk so a restart no
+  // longer signs everyone out or clears the login throttle.
+  const authStateStore = options.authStateStore
+    ?? createAuthStateStore(path.join(directories.config, "auth-state.json"));
+  const authState = await authStateStore.load();
   const auth = createLocalAuth({
     provider: options.authProvider ?? createAccountProvider(accountStore),
     sessionTtlMs: options.authSessionTtlMs,
     loginFailureLimit: options.loginFailureLimit,
     loginFailureWindowMs: options.loginFailureWindowMs,
     now: options.authNow,
+    stateStore: authStateStore,
+    initialState: authState,
+    onPersistError: (error) => {
+      void logger.warn("Auth state could not be written", { message: error.message });
+    },
   });
   const aiProvider = options.aiProvider ?? createMockAiProvider();
   const conversationStore = options.conversationStore
@@ -376,6 +387,9 @@ export async function startLocalRuntime(options = {}) {
     url,
     close() {
       closePromise ??= closeServer(server).then(async () => {
+        // The listener is down, so no further state changes can arrive; flush
+        // the last session/throttle write before reporting a clean stop.
+        await auth.flush();
         await logger.info("Local runtime stopped", { port: address.port });
       });
       return closePromise;

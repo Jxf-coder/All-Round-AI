@@ -58,7 +58,7 @@ test("native accounts normalize email and phone, persist only salted password ha
   }
 });
 
-test("native login survives runtime restart while in-memory sessions do not", async () => {
+test("native login and its session survive a runtime restart", async () => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-native-login-"));
   const dataRoot = path.join(temporaryRoot, "data");
   const accountPath = path.join(dataRoot, "config", "accounts.json");
@@ -107,8 +107,21 @@ test("native login survives runtime restart while in-memory sessions do not", as
       home: temporaryRoot,
       port: 0,
     });
-    const staleSession = await fetch(`${runtime.url}/api/auth/me`, { headers: { cookie } });
-    assert.equal(staleSession.status, 401);
+    // Sessions are mirrored to disk, so the cookie obtained before the restart
+    // is still valid afterwards instead of forcing another sign-in.
+    const resumedSession = await fetch(`${runtime.url}/api/auth/me`, { headers: { cookie } });
+    assert.equal(resumedSession.status, 200);
+    assert.deepEqual((await resumedSession.json()).user, loginPayload.user);
+    // The admin still owes a password change, so the page redirect is the
+    // forced change rather than a bounce back to the login page.
+    const resumedPage = await fetch(`${runtime.url}/`, { headers: { cookie }, redirect: "manual" });
+    assert.equal(resumedPage.status, 302);
+    assert.match(resumedPage.headers.get("location"), /^\/change-password\?next=/);
+    // The persisted state never carries provider context beyond the credential
+    // version, so no credential material can end up on disk.
+    const persistedAuthState = await readFile(path.join(dataRoot, "config", "auth-state.json"), "utf8");
+    assert.equal(persistedAuthState.includes(password), false);
+    assert.equal(persistedAuthState.includes("credentialVersion"), true);
     const freshLogin = await fetch(`${runtime.url}/api/auth/login`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: runtime.url },

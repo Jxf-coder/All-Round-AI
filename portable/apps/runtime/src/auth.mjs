@@ -82,42 +82,75 @@ export function createLocalAuth(options = {}) {
     || !Number.isSafeInteger(loginFailureWindowMs) || loginFailureWindowMs < 1 || typeof now !== "function") {
     throw new TypeError("Login failure limit and window must be positive safe integers");
   }
-  const sessions = new Map();
-  const loginFailures = new Map();
+  const sessions = options.initialState?.sessions ?? new Map();
+  const loginFailures = options.initialState?.loginFailures ?? new Map();
+  const stateStore = options.stateStore ?? null;
+  const onPersistError = options.onPersistError ?? null;
+  let pendingPersist = Promise.resolve();
+
+  // Session and throttle state is authoritative in memory and mirrored to disk
+  // after each mutation, so a restart keeps everyone signed in. A failed write
+  // degrades to in-memory-only state instead of failing the request, and is
+  // reported through onPersistError so it cannot pass unnoticed.
+  function persist() {
+    if (!stateStore) return pendingPersist;
+    pendingPersist = pendingPersist
+      .then(() => stateStore.save({ sessions, loginFailures }))
+      .catch((error) => {
+        if (typeof onPersistError === "function") onPersistError(error);
+      });
+    return pendingPersist;
+  }
+
   const loginKey = (username) => createHash("sha256")
     .update(username.normalize("NFKC").trim().toLowerCase())
     .digest("hex");
-  const pruneLoginFailures = (now) => {
+  const pruneLoginFailures = (at) => {
+    let changed = false;
     for (const [key, failures] of loginFailures) {
-      const recent = failures.filter((timestamp) => now - timestamp < loginFailureWindowMs);
+      const recent = failures.filter((timestamp) => at - timestamp < loginFailureWindowMs);
+      if (recent.length !== failures.length) changed = true;
       if (recent.length) loginFailures.set(key, recent);
       else loginFailures.delete(key);
     }
     while (loginFailures.size > MAX_TRACKED_LOGIN_KEYS) {
       loginFailures.delete(loginFailures.keys().next().value);
+      changed = true;
     }
+    return changed;
   };
   const readSession = (request) => {
     const id = cookie(request);
     const session = id ? sessions.get(id) : null;
     if (session && session.expiresAt <= Date.now()) {
       sessions.delete(id);
+      void persist();
       return null;
     }
     return session;
   };
   const pruneSessions = () => {
-    const now = Date.now();
+    const at = Date.now();
+    let changed = false;
     for (const [id, session] of sessions) {
-      if (session.expiresAt <= now) sessions.delete(id);
+      if (session.expiresAt <= at) {
+        sessions.delete(id);
+        changed = true;
+      }
     }
+    return changed;
   };
+  // Expired state is dropped once at startup and written back if anything was
+  // actually removed, so a long-idle install does not restore dead sessions.
+  const prunedSessions = pruneSessions();
+  const prunedFailures = pruneLoginFailures(now());
+  if (prunedSessions || prunedFailures) void persist();
   const hasSession = (request) => Boolean(readSession(request));
   async function sessionIsValid(request) {
     const id = cookie(request);
     const session = id ? sessions.get(id) : null;
     if (!session || session.expiresAt <= Date.now()) {
-      if (id) sessions.delete(id);
+      if (id && sessions.delete(id)) void persist();
       return false;
     }
     const version = session.context?.credentialVersion;
@@ -127,7 +160,7 @@ export function createLocalAuth(options = {}) {
       } catch {
         return false;
       }
-      sessions.delete(id);
+      if (sessions.delete(id)) void persist();
       return false;
     }
     return true;
@@ -200,6 +233,7 @@ export function createLocalAuth(options = {}) {
           failures.push(attemptedAt);
           loginFailures.set(throttleKey, failures);
           pruneLoginFailures(attemptedAt);
+          void persist();
         }
         json(response, status, { error: error || "账号或密码错误" });
         return true;
@@ -216,13 +250,14 @@ export function createLocalAuth(options = {}) {
         return true;
       }
       const id = randomBytes(32).toString("base64url");
-      // Private authentication context stays server-side. Sessions are
-      // intentionally process-local until a shared store is designed.
+      // Private authentication context stays server-side: only the credential
+      // version is persisted, never provider tokens or the raw context.
       sessions.set(id, {
         user: identity,
         context: result.context ?? null,
         expiresAt: Date.now() + sessionTtlMs,
       });
+      void persist();
       const guestOf = safeGuestOf(result.guestOf);
       json(response, 200, {
         ok: true,
@@ -294,6 +329,7 @@ export function createLocalAuth(options = {}) {
         context: result.context ?? { credentialVersion: result.credentialVersion },
         expiresAt: Date.now() + sessionTtlMs,
       });
+      void persist();
       json(response, 200, { ok: true, user: identity }, {
         "set-cookie": COOKIE + "=" + id + "; Path=/; HttpOnly; SameSite=Lax",
       });
@@ -320,7 +356,7 @@ export function createLocalAuth(options = {}) {
         return true;
       }
       const id = cookie(request);
-      if (id) sessions.delete(id);
+      if (id && sessions.delete(id)) void persist();
       json(response, 200, { ok: true }, {
         "set-cookie": COOKIE + "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
       });
@@ -334,6 +370,11 @@ export function createLocalAuth(options = {}) {
     handle,
     hasSession,
     sessionIsValid,
+    // Awaits any state write still in flight, so a shutdown cannot lose the
+    // session or throttle changes made by the last requests.
+    async flush() {
+      await pendingPersist;
+    },
     async currentUser(request) {
       return (await sessionIsValid(request)) ? readSession(request)?.user ?? null : null;
     },

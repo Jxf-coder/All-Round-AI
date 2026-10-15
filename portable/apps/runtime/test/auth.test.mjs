@@ -252,3 +252,85 @@ test("native session expires and is removed from the runtime session map", async
     assert.equal(whoami.status, 401);
   });
 });
+
+// Both tests below need two runtimes over one data directory, so they manage
+// their own temporary root instead of using the single-runtime helper above.
+async function withRestartableRuntime(options, callback) {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-auth-restart-"));
+  const dataRoot = path.join(temporaryRoot, "data");
+  const request = (runtime, user, password) => fetch(`${runtime.url}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: runtime.url },
+    body: JSON.stringify({ user, password }),
+  });
+  const start = () => startLocalRuntime({
+    ...options,
+    env: { ALLROUND_AI_DATA_DIR: dataRoot },
+    home: temporaryRoot,
+    port: 0,
+  });
+  const runtime = { current: null };
+  try {
+    runtime.current = await start();
+    const restart = async () => {
+      await runtime.current.close();
+      runtime.current = await start();
+      return runtime.current;
+    };
+    await callback({ startup: runtime, restart, request, dataRoot });
+  } finally {
+    if (runtime.current) await runtime.current.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+test("login throttling survives a runtime restart", async () => {
+  const authProvider = async ({ password }) => (password === "valid-password"
+    ? { ok: true, user: { id: "throttle-user", name: "Throttle User", role: "member" } }
+    : { ok: false, status: 401 });
+  // An injected clock keeps the failure window deterministic: the lockout has
+  // to outlive the restart, and has to expire on its own window afterwards.
+  let now = 1_000_000;
+  await withRestartableRuntime(
+    {
+      authProvider,
+      loginFailureLimit: 1,
+      loginFailureWindowMs: 60_000,
+      authNow: () => now,
+    },
+    async ({ startup, restart, request }) => {
+      assert.equal((await request(startup.current, "blocked@example.test", "bad")).status, 401);
+      assert.equal((await request(startup.current, "blocked@example.test", "bad")).status, 429);
+
+      const restarted = await restart();
+      // The throttle was persisted, so the restart does not reset the lockout.
+      assert.equal((await request(restarted, "blocked@example.test", "bad")).status, 429);
+
+      now += 60_001;
+      assert.equal((await request(restarted, "blocked@example.test", "valid-password")).status, 200);
+      // A successful sign-in clears the record even for state loaded from disk.
+      assert.equal((await request(restarted, "blocked@example.test", "bad")).status, 401);
+    },
+  );
+});
+
+test("a logged-out session stays logged out after a restart", async () => {
+  const authProvider = async () => ({
+    ok: true,
+    user: { id: "logout-user", name: "Logout User", role: "member" },
+  });
+  await withRestartableRuntime({ authProvider }, async ({ startup, restart, request }) => {
+    const accepted = await request(startup.current, "logout@example.test", "synthetic-password");
+    assert.equal(accepted.status, 200);
+    const cookie = accepted.headers.get("set-cookie").split(";")[0];
+    const logout = await fetch(`${startup.current.url}/api/auth/logout`, {
+      method: "POST",
+      headers: { cookie, origin: startup.current.url },
+    });
+    assert.equal(logout.status, 200);
+
+    const restarted = await restart();
+    const whoami = await fetch(`${restarted.url}/api/auth/me`, { headers: { cookie } });
+    assert.equal(whoami.status, 401);
+  });
+});
