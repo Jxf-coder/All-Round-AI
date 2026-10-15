@@ -13,6 +13,7 @@ import { createConversationStore } from "./conversations.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
+import { selectContextMessages } from "./ai/context.mjs";
 import { createRouter, json, readJsonBody } from "./router.mjs";
 
 const DEFAULT_PORT = 3141;
@@ -24,8 +25,6 @@ const CONTENT_TYPES = new Map([
 ]);
 const CONTENT_SECURITY_POLICY =
   "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-// How many prior turns are replayed to the provider as context.
-const MAX_CONTEXT_MESSAGES = 20;
 
 // Client-side routes rendered inside the workbench shell. These paths have no
 // dedicated static file and must fall back to workbench.html so the frontend
@@ -338,9 +337,7 @@ export async function startLocalRuntime(options = {}) {
     // The stored conversation is the single source of truth for context, so the
     // client cannot disagree with what was actually said.
     const conversation = await conversationStore.get(ownerId, conversationId);
-    const messages = conversation.messages
-      .slice(-MAX_CONTEXT_MESSAGES)
-      .map((message) => ({ role: message.role, content: message.content }));
+    const messages = selectContextMessages(conversation.messages);
     if (messages.at(-1)?.role !== "user") {
       json(ctx.response, 400, { error: "没有可回复的消息" });
       return true;

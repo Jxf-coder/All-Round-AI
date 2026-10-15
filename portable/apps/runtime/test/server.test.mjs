@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { startLocalRuntime } from "../src/server.mjs";
 import { createMockAiProvider } from "../src/ai/mock-provider.mjs";
+import { DEFAULT_MAX_MESSAGES } from "../src/ai/context.mjs";
 import { startManagedProcess, stopManagedProcess } from "../../../packages/platform/src/processes.mjs";
 
 test("local runtime serves health only on loopback and logs its lifecycle", async () => {
@@ -328,6 +329,21 @@ test("the provider receives the stored conversation as context", async () => {
       { role: "assistant", content: "收到" },
       { role: "user", content: "第二个问题" },
     ]);
+
+    // A long conversation is windowed instead of replayed in full: the opening
+    // exchange is gone, the window stays within the limit, and it still reads as
+    // a well-formed exchange that ends on the question being answered.
+    for (let index = 0; index < DEFAULT_MAX_MESSAGES + 4; index += 1) {
+      await ask(`追问 ${index}`);
+    }
+    const windowed = seen.at(-1);
+    assert.equal(windowed.length <= DEFAULT_MAX_MESSAGES, true);
+    assert.equal(windowed.some((message) => message.content === "第一个问题"), false);
+    assert.deepEqual(windowed.at(-1), { role: "user", content: `追问 ${DEFAULT_MAX_MESSAGES + 3}` });
+    assert.deepEqual(
+      windowed.map((message) => message.role),
+      windowed.map((_, index) => (index % 2 === 0 ? "user" : "assistant")),
+    );
   } finally {
     if (runtime) await runtime.close().catch(() => {});
     await rm(temporaryRoot, { recursive: true, force: true });
