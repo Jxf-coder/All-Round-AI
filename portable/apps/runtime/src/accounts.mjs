@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
-import { access, chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import path from "node:path";
 import { promisify } from "node:util";
+
+import { createJsonFileStore } from "../../../packages/platform/src/storage.mjs";
 
 const scrypt = promisify(scryptCallback);
 const HASH_BYTES = 32;
@@ -56,51 +56,17 @@ function publicUser(user) {
 }
 
 export async function createAccountStore(filePath) {
-  if (typeof filePath !== "string" || !path.isAbsolute(filePath)) {
-    throw new TypeError("An absolute account store path is required");
-  }
-  let pendingWrite = Promise.resolve();
-
-  async function readStore() {
-    try {
-      return validateDocument(JSON.parse(await readFile(filePath, "utf8")));
-    } catch (error) {
-      if (error.code === "ENOENT") return { version: 1, users: [] };
-      throw error;
-    }
-  }
-
-  async function writeStore(value) {
-    const directory = path.dirname(filePath);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await access(directory, 2);
-    if (process.platform !== "win32") await chmod(directory, 0o700);
-    const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
-    let handle;
-    try {
-      handle = await open(temporaryPath, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-      await handle.sync();
-      await handle.close();
-      handle = null;
-      await rename(temporaryPath, filePath);
-      if (process.platform !== "win32") {
-        const directoryHandle = await open(directory, "r");
-        try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
-      }
-    } catch (error) {
-      if (handle) await handle.close().catch(() => {});
-      await rm(temporaryPath, { force: true }).catch(() => {});
-      throw error;
-    }
-  }
+  const store = createJsonFileStore(filePath, {
+    initial: () => ({ version: 1, users: [] }),
+    validate: validateDocument,
+  });
 
   return Object.freeze({
     async count() {
-      return (await readStore()).users.length;
+      return (await store.read()).users.length;
     },
     async list() {
-      const document = await readStore();
+      const document = await store.read();
       return document.users.map((user) => ({
         ...publicUser(user),
         username: user.username,
@@ -118,8 +84,7 @@ export async function createAccountStore(filePath) {
         ? displayName.trim().slice(0, 100)
         : username;
 
-      const operation = pendingWrite.then(async () => {
-        const document = await readStore();
+      return store.update(async (document) => {
         if (document.users.some((user) => user.username === username)) {
           throw new Error("All Round AI account already exists");
         }
@@ -137,18 +102,15 @@ export async function createAccountStore(filePath) {
           createdAt: new Date().toISOString(),
         };
         document.users.push(user);
-        await writeStore(document);
         return publicUser(user);
       });
-      pendingWrite = operation.catch(() => {});
-      return operation;
     },
     async authenticate(rawUsername, password) {
       const username = normalizeUsername(rawUsername);
       if (typeof password !== "string" || password.length > 1024) {
         return { ok: false, status: 401 };
       }
-      const document = await readStore();
+      const document = await store.read();
       const user = username ? document.users.find((candidate) => candidate.username === username) : null;
       const salt = user ? Buffer.from(user.salt, "base64url") : DUMMY_SALT;
       const expected = user ? Buffer.from(user.passwordHash, "base64url") : Buffer.alloc(HASH_BYTES);
@@ -167,8 +129,7 @@ export async function createAccountStore(filePath) {
         || typeof newPassword !== "string" || [...newPassword].length < 12 || newPassword.length > 1024) {
         return { ok: false, reason: "invalid" };
       }
-      const operation = pendingWrite.then(async () => {
-        const document = await readStore();
+      return store.update(async (document) => {
         const user = document.users.find((candidate) => candidate.id === userId);
         if (!user) return { ok: false, reason: "unauthorized" };
         const salt = Buffer.from(user.salt, "base64url");
@@ -182,11 +143,8 @@ export async function createAccountStore(filePath) {
         user.passwordHash = passwordHash.toString("base64url");
         user.mustChangePassword = false;
         user.credentialVersion = (user.credentialVersion ?? 1) + 1;
-        await writeStore(document);
         return { ok: true, user: publicUser(user), credentialVersion: user.credentialVersion };
       });
-      pendingWrite = operation.catch(() => {});
-      return operation;
     },
     async resetPassword(rawUsername, password) {
       const username = normalizeUsername(rawUsername);
@@ -194,8 +152,7 @@ export async function createAccountStore(filePath) {
       if (typeof password !== "string" || [...password].length < 12 || password.length > 1024) {
         throw new TypeError("密码长度必须为 12 至 1024 个字符");
       }
-      const operation = pendingWrite.then(async () => {
-        const document = await readStore();
+      return store.update(async (document) => {
         const user = document.users.find((candidate) => candidate.username === username);
         if (!user) throw new Error("All Round AI account was not found");
         const salt = randomBytes(16);
@@ -204,15 +161,12 @@ export async function createAccountStore(filePath) {
         user.passwordHash = passwordHash.toString("base64url");
         user.mustChangePassword = true;
         user.credentialVersion = (user.credentialVersion ?? 1) + 1;
-        await writeStore(document);
         return publicUser(user);
       });
-      pendingWrite = operation.catch(() => {});
-      return operation;
     },
     async isSessionValid(userId, credentialVersion) {
       if (typeof userId !== "string" || !Number.isSafeInteger(credentialVersion)) return false;
-      const document = await readStore();
+      const document = await store.read();
       const user = document.users.find((candidate) => candidate.id === userId);
       return Boolean(user && (user.credentialVersion ?? 1) === credentialVersion);
     },

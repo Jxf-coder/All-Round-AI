@@ -1,50 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 
+import { json, readJsonBody as bodyJson } from "./router.mjs";
+
 const COOKIE = "all_round_ai_session";
-const MAX_BODY = 16 * 1024;
 const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const MAX_ACTIVE_SESSIONS = 1000;
 const DEFAULT_LOGIN_FAILURE_LIMIT = 5;
 const DEFAULT_LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const MAX_TRACKED_LOGIN_KEYS = 10_000;
-
-function json(response, status, value, headers = {}) {
-  response.writeHead(status, {
-    "cache-control": "no-store",
-    "content-type": "application/json; charset=utf-8",
-    "x-content-type-options": "nosniff",
-    ...headers,
-  });
-  response.end(JSON.stringify(value));
-}
-
-async function bodyJson(request) {
-  if (!/^application\/json(?:\s*;|$)/i.test(request.headers["content-type"] || "")) {
-    const error = new Error("Content-Type must be application/json");
-    error.status = 415;
-    throw error;
-  }
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request) {
-    size += chunk.length;
-    if (size > MAX_BODY) {
-      const error = new Error("Request body too large");
-      error.status = 413;
-      throw error;
-    }
-    chunks.push(chunk);
-  }
-  try {
-    const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
-    return value;
-  } catch {
-    const error = new Error("请求格式错误");
-    error.status = 400;
-    throw error;
-  }
-}
 
 function cookie(request) {
   for (const part of (request.headers.cookie || "").split(";")) {

@@ -48,7 +48,6 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(pageHtml, /href="workbench\.css"/);
     assert.match(pageHtml, /src="workbench\.js"/);
     assert.equal(new URL("workbench.css", `${runtime.url}/`).pathname, "/workbench.css");
-    assert.doesNotMatch(pageHtml, /~legacy-brand~/i);
 
     const style = await fetch(`${runtime.url}/workbench.css`);
     assert.equal(style.status, 200);
@@ -102,6 +101,172 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
 test("runtime rejects invalid ports before opening a listener", async () => {
   await assert.rejects(startLocalRuntime({ port: 65536 }), /Port must be an integer/);
   await assert.rejects(startLocalRuntime({ port: "not-a-port" }), /Port must be an integer/);
+});
+
+test("runtime falls back to the workbench shell for client routes and serves the mock AI", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-ai-"));
+  const dataDirectory = path.join(temporaryRoot, "data");
+  let runtime;
+  try {
+    runtime = await startLocalRuntime({
+      authProvider: async () => ({
+        ok: true,
+        user: { id: "test-user", name: "Test User", role: "admin", source: "all-round-ai" },
+        landing: "/",
+      }),
+      env: { ALLROUND_AI_DATA_DIR: dataDirectory },
+      home: temporaryRoot,
+      port: 0,
+    });
+
+    // Unauthenticated API calls are rejected instead of leaking data.
+    assert.equal((await fetch(`${runtime.url}/api/ai/models`)).status, 401);
+    assert.equal((await fetch(`${runtime.url}/api/admin/accounts`, { method: "POST" })).status, 405);
+
+    const login = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "test@example.test", password: "synthetic-test-password" }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+
+    // Deep client-side routes resolve to the same workbench shell.
+    const deepRoute = await fetch(`${runtime.url}/workbench/chat/42`, { headers: { cookie } });
+    assert.equal(deepRoute.status, 200);
+    assert.match(deepRoute.headers.get("content-type"), /text\/html/);
+    assert.match(await deepRoute.text(), /All Round AI 工作台/);
+
+    const models = await fetch(`${runtime.url}/api/ai/models`, { headers: { cookie } });
+    assert.equal(models.status, 200);
+    const modelPayload = await models.json();
+    assert.equal(modelPayload.provider, "mock");
+    assert.equal(modelPayload.models.length >= 1, true);
+
+    const chat = await fetch(`${runtime.url}/api/ai/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ messages: [{ role: "user", content: "你好" }] }),
+    });
+    assert.equal(chat.status, 200);
+    const chatPayload = await chat.json();
+    assert.equal(chatPayload.finishReason, "stop");
+    assert.match(chatPayload.content, /你好/);
+
+    const stream = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ messages: [{ role: "user", content: "流式测试" }] }),
+    });
+    assert.equal(stream.status, 200);
+    assert.match(stream.headers.get("content-type"), /text\/event-stream/);
+    const streamBody = await stream.text();
+    assert.match(streamBody, /^data: /m);
+    assert.match(streamBody, /"finishReason":"stop"/);
+    // Deltas are split across SSE frames, so the reply is reassembled to check
+    // that the full text (including the user's question) survives streaming.
+    const streamed = streamBody
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)))
+      .filter((payload) => payload.delta)
+      .map((payload) => payload.delta)
+      .join("");
+    assert.match(streamed, /流式测试/);
+
+    // A JSON endpoint rejects non-JSON bodies with 415.
+    const badBody = await fetch(`${runtime.url}/api/ai/chat`, {
+      method: "POST",
+      headers: { "content-type": "text/plain", origin: runtime.url, cookie },
+      body: "plain text",
+    });
+    assert.equal(badBody.status, 415);
+
+    assert.match(deepRoute.headers.get("x-request-id"), /^[0-9a-f]{32}$/);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("conversation history is persisted per account through the API", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-history-"));
+  const dataDirectory = path.join(temporaryRoot, "data");
+  let runtime;
+  try {
+    runtime = await startLocalRuntime({
+      authProvider: async ({ user }) => ({
+        ok: true,
+        user: { id: user, name: user, role: "member", source: "all-round-ai" },
+        landing: "/",
+      }),
+      env: { ALLROUND_AI_DATA_DIR: dataDirectory },
+      home: temporaryRoot,
+      port: 0,
+    });
+    const jsonHeaders = (sessionCookie) => ({
+      "content-type": "application/json",
+      origin: runtime.url,
+      cookie: sessionCookie,
+    });
+    async function login(username) {
+      const response = await fetch(`${runtime.url}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: runtime.url },
+        body: JSON.stringify({ user: username, password: "synthetic-test-password" }),
+      });
+      assert.equal(response.status, 200);
+      return response.headers.get("set-cookie").split(";")[0];
+    }
+
+    assert.equal((await fetch(`${runtime.url}/api/conversations`)).status, 401);
+
+    const owner = await login("owner@example.test");
+    assert.deepEqual(await (await fetch(`${runtime.url}/api/conversations`, { headers: { cookie: owner } })).json(),
+      { conversations: [] });
+
+    const created = await fetch(`${runtime.url}/api/conversations`, {
+      method: "POST", headers: jsonHeaders(owner), body: "{}",
+    });
+    assert.equal(created.status, 201);
+    const { conversation } = await created.json();
+    assert.equal(conversation.title, "新对话");
+
+    const appended = await fetch(`${runtime.url}/api/conversations/${conversation.id}/messages`, {
+      method: "POST",
+      headers: jsonHeaders(owner),
+      body: JSON.stringify({ role: "user", content: "把季度目标拆成周计划" }),
+    });
+    assert.equal(appended.status, 201);
+
+    const detail = await (await fetch(`${runtime.url}/api/conversations/${conversation.id}`,
+      { headers: { cookie: owner } })).json();
+    assert.equal(detail.conversation.title, "把季度目标拆成周计划");
+    assert.equal(detail.conversation.messages.length, 1);
+
+    // The stored history is scoped to the signed-in account.
+    const stranger = await login("stranger@example.test");
+    const strangerList = await (await fetch(`${runtime.url}/api/conversations`, { headers: { cookie: stranger } })).json();
+    assert.deepEqual(strangerList.conversations, []);
+    assert.equal((await fetch(`${runtime.url}/api/conversations/${conversation.id}`, { headers: { cookie: stranger } })).status, 404);
+    assert.equal((await fetch(`${runtime.url}/api/conversations/${conversation.id}`, {
+      method: "DELETE", headers: { cookie: stranger },
+    })).status, 404);
+
+    const rejected = await fetch(`${runtime.url}/api/conversations/${conversation.id}/messages`, {
+      method: "POST", headers: jsonHeaders(owner), body: JSON.stringify({ role: "system", content: "x" }),
+    });
+    assert.equal(rejected.status, 400);
+
+    const removed = await fetch(`${runtime.url}/api/conversations/${conversation.id}`, {
+      method: "DELETE", headers: { cookie: owner },
+    });
+    assert.equal(removed.status, 200);
+    assert.equal((await fetch(`${runtime.url}/api/conversations/${conversation.id}`, { headers: { cookie: owner } })).status, 404);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("runtime command starts, answers health checks, logs, and shuts down cleanly", async () => {

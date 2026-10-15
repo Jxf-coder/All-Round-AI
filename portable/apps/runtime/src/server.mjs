@@ -7,6 +7,9 @@ import { ensureAppDirectories } from "../../../packages/platform/src/directories
 import { createAppLogger } from "../../../packages/platform/src/logging.mjs";
 import { createAccountProvider, createAccountStore } from "./accounts.mjs";
 import { createLocalAuth } from "./auth.mjs";
+import { createConversationStore } from "./conversations.mjs";
+import { createMockAiProvider } from "./ai/mock-provider.mjs";
+import { createRouter, json, readJsonBody } from "./router.mjs";
 
 const DEFAULT_PORT = 3141;
 const WORKBENCH_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -15,20 +18,56 @@ const CONTENT_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
 ]);
+const CONTENT_SECURITY_POLICY =
+  "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
-async function serveWorkbench(request, response) {
+// Client-side routes rendered inside the workbench shell. These paths have no
+// dedicated static file and must fall back to workbench.html so the frontend
+// router can take over. Extend this list as pages are ported.
+const CLIENT_ROUTE_PREFIXES = ["/workbench"];
+
+function isClientRoute(pathname) {
+  return CLIENT_ROUTE_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+}
+
+function isProtectedPage(pathname) {
+  return pathname === "/" || isClientRoute(pathname) || pathname === "/workbench.html"
+    || pathname === "/change-password";
+}
+
+function isPublicAuthAsset(pathname) {
+  return pathname === "/login.css" || pathname === "/login.js" || pathname === "/change-password.js";
+}
+
+function parsePort(value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new RangeError("Port must be an integer between 0 and 65535");
+  }
+  return port;
+}
+
+function closeServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+async function serveWorkbench(ctx) {
+  const { request, response, url } = ctx;
   if (request.method !== "GET" && request.method !== "HEAD") return false;
-  const requestUrl = new URL(request.url, "http://127.0.0.1");
-  const pathname = requestUrl.pathname;
+  const pathname = url.pathname;
   if (pathname === "/login/") {
     response.writeHead(308, {
       "cache-control": "no-store",
-      location: `/login${requestUrl.search}`,
+      location: `/login${url.search}`,
     });
     response.end();
     return true;
   }
-  const relative = pathname === "/"
+  const relative = pathname === "/" || isClientRoute(pathname)
     ? "workbench.html"
     : pathname === "/login" || pathname === "/login/"
       ? "login.html"
@@ -53,7 +92,7 @@ async function serveWorkbench(request, response) {
       "cache-control": "no-store",
       "content-type": type,
       "x-content-type-options": "nosniff",
-      "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "content-security-policy": CONTENT_SECURITY_POLICY,
     });
     response.end(request.method === "HEAD" ? undefined : body);
   } catch (error) {
@@ -64,27 +103,9 @@ async function serveWorkbench(request, response) {
   return true;
 }
 
-function isProtectedPage(pathname) {
-  return pathname === "/" || pathname === "/workbench" || pathname === "/workbench.html"
-    || pathname.startsWith("/workbench/") || pathname === "/change-password";
-}
-
-function isPublicAuthAsset(pathname) {
-  return pathname === "/login.css" || pathname === "/login.js" || pathname === "/change-password.js";
-}
-
-function parsePort(value) {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new RangeError("Port must be an integer between 0 and 65535");
-  }
-  return port;
-}
-
-function closeServer(server) {
-  return new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
+function redirect(response, location, status = 302) {
+  response.writeHead(status, { "cache-control": "no-store", location });
+  response.end();
 }
 
 export async function startLocalRuntime(options = {}) {
@@ -100,75 +121,238 @@ export async function startLocalRuntime(options = {}) {
     loginFailureWindowMs: options.loginFailureWindowMs,
     now: options.authNow,
   });
+  const aiProvider = options.aiProvider ?? createMockAiProvider();
+  const conversationStore = options.conversationStore
+    ?? await createConversationStore(path.join(directories.config, "conversations.json"));
+
+  // Every authenticated API shares the same gate: a valid session, and a
+  // completed first-login password change. Handlers stay free of auth details.
+  async function requireActor(ctx) {
+    const actor = await auth.currentUser(ctx.request);
+    if (!actor) {
+      json(ctx.response, 401, { error: "请先登录" });
+      return null;
+    }
+    if (auth.mustChangePassword(ctx.request)) {
+      json(ctx.response, 403, { error: "请先修改初始密码" });
+      return null;
+    }
+    return actor;
+  }
+
+  async function readOptionalJsonBody(ctx) {
+    if (!ctx.request.headers["content-type"]) return {};
+    return readJsonBody(ctx.request);
+  }
+
+  const router = createRouter({ fallback: guardedWorkbench });
+
+  // Page-level guards run after API routes and before static files, matching
+  // the original dispatch order: an authenticated API handler must be able to
+  // answer its own 401/403 instead of being replaced by a page redirect.
+  async function guardedWorkbench(ctx) {
+    const pathname = ctx.url.pathname;
+    if (auth.enabled && isProtectedPage(pathname) && !(await auth.sessionIsValid(ctx.request))) {
+      redirect(ctx.response, `/login?next=${encodeURIComponent(pathname + ctx.url.search)}`);
+      return true;
+    }
+    if (auth.enabled && auth.mustChangePassword(ctx.request)
+      && pathname !== "/change-password" && !isPublicAuthAsset(pathname)) {
+      redirect(ctx.response, `/change-password?next=${encodeURIComponent(pathname + ctx.url.search)}`);
+      return true;
+    }
+    return serveWorkbench(ctx);
+  }
+
+  // Health check stays first and unauthenticated, matching the original order.
+  router.use((ctx) => {
+    if (ctx.request.method === "GET" && ctx.url.pathname === "/health") {
+      json(ctx.response, 200, { service: "all-round-ai", status: "ok" });
+      return true;
+    }
+  });
+
+  // Normalise the change-password trailing slash before authentication, so
+  // deep links are redirected early and never dip into protected-page logic.
+  router.use((ctx) => {
+    if ((ctx.request.method === "GET" || ctx.request.method === "HEAD")
+      && ctx.url.pathname === "/change-password/") {
+      redirect(ctx.response, `/change-password${ctx.url.search}`, 308);
+      return true;
+    }
+  });
+
+  // Authentication endpoints (/api/auth/*) are self-dispatching.
+  router.use((ctx) => auth.handle(ctx.request, ctx.response));
+
+  // Admin API routes. New /api/* routes are registered here as stage 2 grows;
+  // this replaces the previous inline if-else chain.
+  router.get("/api/admin/accounts", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    if (actor.role !== "admin") {
+      json(ctx.response, 403, { error: "没有管理员权限" });
+      return true;
+    }
+    const accounts = await accountStore.list();
+    json(ctx.response, 200, { accounts });
+    return true;
+  });
+
+  // AI capability surface. Providers are pluggable: the default is a full mock,
+  // and a real Trae provider will be swapped in here later without UI changes.
+  router.get("/api/ai/models", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    json(ctx.response, 200, { provider: aiProvider.id, models: await aiProvider.listModels() });
+    return true;
+  });
+
+  router.post("/api/ai/chat", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    let body;
+    try {
+      body = await readJsonBody(ctx.request);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    try {
+      const result = await aiProvider.chat({
+        model: body.model,
+        messages: body.messages,
+        signal: ctx.signal,
+      });
+      if (!ctx.response.destroyed) json(ctx.response, 200, result);
+    } catch (error) {
+      // The client may already be gone when a cancellation lands; writing to a
+      // destroyed response would throw, so the reply is skipped in that case.
+      if (!ctx.response.destroyed) {
+        // 499 mirrors the "client closed request" convention used by proxies.
+        json(ctx.response, error.name === "AbortError" ? 499 : 502,
+          error.name === "AbortError" ? { error: "请求已取消" } : { error: "AI 服务暂时不可用" });
+      }
+    }
+    return true;
+  });
+
+  // Streaming variant. Emits Server-Sent Events so the workbench can render
+  // tokens as they arrive. Aborts propagate through the request signal, which
+  // cancels the underlying provider generator.
+  router.post("/api/ai/chat/stream", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    let body;
+    try {
+      body = await readJsonBody(ctx.request);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const { response } = ctx;
+    response.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": "text/event-stream; charset=utf-8",
+      "x-content-type-options": "nosniff",
+      "connection": "keep-alive",
+    });
+    const send = (payload) => {
+      if (!response.destroyed && !response.writableEnded) {
+        response.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }
+    };
+    try {
+      for await (const chunk of aiProvider.streamChat({
+        model: body.model,
+        messages: body.messages,
+        signal: ctx.signal,
+      })) {
+        if (chunk.delta) send({ delta: chunk.delta });
+        if (chunk.finishReason) send({ finishReason: chunk.finishReason });
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") send({ error: "AI 服务暂时不可用" });
+    }
+    if (!response.destroyed) response.end();
+    return true;
+  });
+
+  // Conversation history. Documents are scoped to the signed-in account so one
+  // user can never read or mutate another user's conversations.
+  router.get("/api/conversations", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    json(ctx.response, 200, { conversations: await conversationStore.list(String(actor.id)) });
+    return true;
+  });
+
+  router.post("/api/conversations", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const conversation = await conversationStore.create(String(actor.id), { title: body.title });
+    json(ctx.response, 201, { conversation });
+    return true;
+  });
+
+  router.get("/api/conversations/:id", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    const conversation = await conversationStore.get(String(actor.id), ctx.params.id);
+    if (!conversation) {
+      json(ctx.response, 404, { error: "对话不存在" });
+      return true;
+    }
+    json(ctx.response, 200, { conversation });
+    return true;
+  });
+
+  router.post("/api/conversations/:id/messages", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    let body;
+    try {
+      body = await readJsonBody(ctx.request);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    let message;
+    try {
+      message = await conversationStore.appendMessage(String(actor.id), ctx.params.id, {
+        role: body.role,
+        content: body.content,
+      });
+    } catch (error) {
+      json(ctx.response, 400, { error: error.message || "消息格式错误" });
+      return true;
+    }
+    if (!message) {
+      json(ctx.response, 404, { error: "对话不存在" });
+      return true;
+    }
+    json(ctx.response, 201, { message });
+    return true;
+  });
+
+  router.delete("/api/conversations/:id", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    const removed = await conversationStore.remove(String(actor.id), ctx.params.id);
+    json(ctx.response, removed ? 200 : 404, removed ? { ok: true } : { error: "对话不存在" });
+    return true;
+  });
 
   const server = createServer((request, response) => {
     void (async () => {
-    if (request.method === "GET" && request.url === "/health") {
-      response.writeHead(200, {
-        "cache-control": "no-store",
-        "content-type": "application/json; charset=utf-8",
-      });
-      response.end(JSON.stringify({ service: "all-round-ai", status: "ok" }));
-      return;
-    }
-    const incomingUrl = new URL(request.url, "http://127.0.0.1");
-    if ((request.method === "GET" || request.method === "HEAD") && incomingUrl.pathname === "/change-password/") {
-      response.writeHead(308, {
-        "cache-control": "no-store",
-        location: `/change-password${incomingUrl.search}`,
-      });
-      response.end();
-      return;
-    }
-    if (await auth.handle(request, response)) return;
-    const requestUrl = incomingUrl;
-    if (requestUrl.pathname === "/api/admin/accounts") {
-      if (request.method !== "GET") {
-        response.writeHead(405, { "allow": "GET", "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify({ error: "Method not allowed" }));
-        return;
+      const handled = await router.dispatch(request, response, { logger, auth, accountStore });
+      if (!handled && !response.headersSent) {
+        json(response, 404, { error: "Not found" });
       }
-      const actor = await auth.currentUser(request);
-      if (!actor) {
-        response.writeHead(401, { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify({ error: "请先登录" }));
-        return;
-      }
-      if (auth.mustChangePassword(request)) {
-        response.writeHead(403, { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify({ error: "请先修改初始密码" }));
-        return;
-      }
-      if (actor.role !== "admin") {
-        response.writeHead(403, { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify({ error: "没有管理员权限" }));
-        return;
-      }
-      const accounts = await accountStore.list();
-      response.writeHead(200, {
-        "cache-control": "no-store",
-        "content-type": "application/json; charset=utf-8",
-        "x-content-type-options": "nosniff",
-      });
-      response.end(JSON.stringify({ accounts }));
-      return;
-    }
-    if (auth.enabled && isProtectedPage(requestUrl.pathname) && !(await auth.sessionIsValid(request))) {
-      response.writeHead(302, { "cache-control": "no-store", location: "/login?next=" + encodeURIComponent(requestUrl.pathname + requestUrl.search) });
-      response.end();
-      return;
-    }
-    if (auth.enabled && auth.mustChangePassword(request) && requestUrl.pathname !== "/change-password" && !isPublicAuthAsset(requestUrl.pathname)) {
-      response.writeHead(302, {
-        "cache-control": "no-store",
-        location: "/change-password?next=" + encodeURIComponent(requestUrl.pathname + requestUrl.search),
-      });
-      response.end();
-      return;
-    }
-    if (await serveWorkbench(request, response)) return;
-    response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-    response.end(JSON.stringify({ error: "Not found" }));
     })().catch((error) => {
       if (!response.headersSent) response.writeHead(500);
       response.end();
