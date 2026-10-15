@@ -12,6 +12,7 @@ import { createConfigStore } from "./config-store.mjs";
 import { createConversationStore } from "./conversations.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
+import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
@@ -150,6 +151,8 @@ export async function startLocalRuntime(options = {}) {
   // Projects scope the chat history, so every conversation lives in one.
   const projectStore = options.projectStore
     ?? await createProjectStore(path.join(directories.config, "projects.json"));
+  const memoryStore = options.memoryStore
+    ?? await createMemoryStore(path.join(directories.config, "memory.json"));
 
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
@@ -166,9 +169,9 @@ export async function startLocalRuntime(options = {}) {
     return actor;
   }
 
-  async function readOptionalJsonBody(ctx) {
+  async function readOptionalJsonBody(ctx, options) {
     if (!ctx.request.headers["content-type"]) return {};
-    return readJsonBody(ctx.request);
+    return readJsonBody(ctx.request, options);
   }
 
   const router = createRouter({ fallback: guardedWorkbench });
@@ -341,7 +344,12 @@ export async function startLocalRuntime(options = {}) {
     // The stored conversation is the single source of truth for context, so the
     // client cannot disagree with what was actually said.
     const conversation = await conversationStore.get(ownerId, conversationId);
-    const messages = selectContextMessages(conversation.messages);
+    const memory = await memoryStore.get(conversation.projectId ?? await projectStore.defaultRootId());
+    const memoryBlock = buildMemoryBlock(memory);
+    const messages = [
+      ...(memoryBlock ? [{ role: "system", content: memoryBlock }] : []),
+      ...selectContextMessages(conversation.messages),
+    ];
     if (messages.at(-1)?.role !== "user") {
       json(ctx.response, 400, { error: "没有可回复的消息" });
       return true;
@@ -422,6 +430,48 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, 201, { project });
     } catch (error) {
       json(ctx.response, 400, { error: error.message || "创建项目失败" });
+    }
+    return true;
+  });
+
+  // Agent memory (人格 SOUL.md / 长期记忆 MEMORY.md) is stored per project and
+  // replayed into every chat turn of that project.
+  router.get("/api/memory", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const defaultProjectId = await projectStore.defaultRootId();
+    const requested = ctx.url.searchParams.get("projectId");
+    if (requested && !(await projectStore.get(requested))) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    const projectId = requested || defaultProjectId;
+    json(ctx.response, 200, await memoryStore.get(projectId));
+    return true;
+  });
+
+  // Saving mirrors the reference workbench, which posts to the same path it
+  // reads from with both documents in the body.
+  router.post("/api/memory", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    let body;
+    try {
+      // Two long documents do not fit the shared 16 KiB request limit, so this
+      // endpoint raises it; the per-document cap still bounds what is stored.
+      body = await readOptionalJsonBody(ctx, { maxBytes: 128 * 1024 });
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const defaultProjectId = await projectStore.defaultRootId();
+    const projectId = typeof body.projectId === "string" && body.projectId ? body.projectId : defaultProjectId;
+    if (!(await projectStore.get(projectId))) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    try {
+      json(ctx.response, 200, await memoryStore.save(projectId, { soul: body.soul, memory: body.memory }));
+    } catch (error) {
+      json(ctx.response, 400, { error: error.message || "记忆保存失败" });
     }
     return true;
   });

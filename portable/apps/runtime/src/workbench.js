@@ -470,6 +470,82 @@ async function selectProject(id) {
   await loadHistory();
 }
 
+// ---------------------------------------------------------------------------
+// Agent memory (人格 SOUL.md / 长期记忆 MEMORY.md). The two documents live on the
+// server per project and are replayed into every chat turn, so what is saved
+// here actually changes how the assistant replies.
+// ---------------------------------------------------------------------------
+const memoryModal = $("#memory-modal");
+const memoryTitle = $("#memory-title");
+const memoryEditor = $("#memory-editor");
+const memoryHint = $("#memory-hint");
+const memoryStatus = $("#memory-status");
+const memorySave = $("#memory-save");
+const MEMORY_HINTS = {
+  soul: "人格：说明这个 Agent 是谁、为谁服务，以及职责、风格与禁忌。",
+  memory: "长期记忆：跨会话有效的事实、决策与偏好写在这里。",
+};
+const MEMORY_PLACEHOLDERS = {
+  soul: "例：你是内容策划 Agent，为电商团队服务。回答简洁可执行，先给结论再给理由；不确定时直说。",
+  memory: "例：主推产品是折叠彩虹琴；短视频统一 9:16、30 秒以内；回答用中文。",
+};
+let memoryTab = "soul";
+let memoryDraft = { soul: "", memory: "" };
+
+function renderMemory() {
+  memoryEditor.value = memoryDraft[memoryTab] ?? "";
+  memoryEditor.placeholder = MEMORY_PLACEHOLDERS[memoryTab];
+  memoryHint.textContent = MEMORY_HINTS[memoryTab];
+  for (const tab of document.querySelectorAll(".memory-tab")) {
+    const active = tab.dataset.memoryTab === memoryTab;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  }
+}
+
+async function openMemory() {
+  memoryModal.hidden = false;
+  memoryTitle.textContent = `人格与记忆 · ${projectNameOf(currentProjectId)}`;
+  memoryTab = "soul";
+  memoryDraft = { soul: "", memory: "" };
+  memoryStatus.textContent = "加载中…";
+  renderMemory();
+  const response = await apiRequest(`/api/memory?projectId=${encodeURIComponent(currentProjectId ?? "")}`);
+  if (!response?.ok) {
+    memoryStatus.textContent = "无法读取记忆";
+    return;
+  }
+  const payload = await response.json();
+  memoryDraft = { soul: payload.soul ?? "", memory: payload.memory ?? "" };
+  memoryStatus.textContent = payload.updatedAt
+    ? `上次保存：${new Date(payload.updatedAt).toLocaleString()}`
+    : "";
+  renderMemory();
+}
+
+function closeMemory() {
+  memoryModal.hidden = true;
+}
+
+async function saveMemory() {
+  memorySave.disabled = true;
+  memorySave.textContent = "保存中…";
+  const response = await apiRequest("/api/memory", {
+    method: "POST",
+    body: JSON.stringify({ projectId: currentProjectId, soul: memoryDraft.soul, memory: memoryDraft.memory }),
+  });
+  memorySave.disabled = false;
+  memorySave.textContent = "保存";
+  const payload = await response?.json().catch(() => ({}));
+  if (!response?.ok) {
+    memoryStatus.textContent = payload?.error || "保存失败";
+    return;
+  }
+  memoryDraft = { soul: payload.soul ?? "", memory: payload.memory ?? "" };
+  memoryStatus.textContent = `已保存 ${new Date(payload.updatedAt).toLocaleString()}`;
+  renderMemory();
+}
+
 // Consumes the /api/ai/chat/stream SSE endpoint. The server owns the exchange
 // (it appends the question, replays context and stores the answer), so this
 // only renders deltas and reports how the turn ended.
@@ -593,6 +669,17 @@ document.addEventListener("click", (event) => {
   closeProjectMenu();
 });
 document.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => startConversation(button.dataset.prompt)));
+$("#memory-toggle").addEventListener("click", () => void openMemory());
+$("#memory-close").addEventListener("click", closeMemory);
+memoryModal.addEventListener("click", (event) => { if (event.target === memoryModal) closeMemory(); });
+memorySave.addEventListener("click", () => void saveMemory());
+// Edits stay in the draft until 保存, and switching tabs keeps them.
+memoryEditor.addEventListener("input", () => { memoryDraft[memoryTab] = memoryEditor.value; });
+document.querySelectorAll(".memory-tab").forEach((tab) => tab.addEventListener("click", () => {
+  memoryDraft[memoryTab] = memoryEditor.value;
+  memoryTab = tab.dataset.memoryTab;
+  renderMemory();
+}));
 $("#new-agent").addEventListener("click", () => { conversation.replaceChildren(); welcome.classList.remove("hidden"); startConversation(); });
 $("#drawer-start").addEventListener("click", () => startConversation());
 $("#agent-toggle").addEventListener("click", () => drawer.classList.toggle("open"));
@@ -614,7 +701,7 @@ $("#mobile-search").addEventListener("click", openSearch);
 searchModal.addEventListener("click", (event) => { if (event.target === searchModal) searchModal.hidden = true; });
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); openSearch(); }
-  if (event.key === "Escape") { searchModal.hidden = true; drawer.classList.remove("open"); rail.classList.remove("mobile-open"); closeModelMenu(); closeProjectMenu(); }
+  if (event.key === "Escape") { searchModal.hidden = true; drawer.classList.remove("open"); rail.classList.remove("mobile-open"); closeModelMenu(); closeProjectMenu(); closeMemory(); }
 });
 $("#search-input").addEventListener("input", (event) => {
   $(".search-empty").textContent = event.target.value.trim() ? "原型阶段尚未连接 Skill、知识与任务索引。" : "输入关键词开始搜索";

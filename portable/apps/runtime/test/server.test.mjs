@@ -631,6 +631,114 @@ test("the project tree is seeded, listed and created over the API", async () => 
   }
 });
 
+test("agent memory is stored per project and injected into the chat turn", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-memory-"));
+  const seen = [];
+  let runtime;
+  try {
+    const recording = {
+      id: "recording",
+      label: "Recording",
+      async listModels() { return [{ id: "recording-1", name: "Recording" }]; },
+      async chat({ messages }) { seen.push(messages); return { content: "ok", finishReason: "stop" }; },
+      async *streamChat({ messages }) {
+        seen.push(messages);
+        yield { delta: "收到" };
+        yield { finishReason: "stop" };
+      },
+    };
+    runtime = await startLocalRuntime({
+      aiProvider: recording,
+      authProvider: async ({ user }) => ({
+        ok: true,
+        user: { id: user, name: user, role: "admin", source: "all-round-ai" },
+        landing: "/",
+      }),
+      env: { ALLROUND_AI_DATA_DIR: path.join(temporaryRoot, "data") },
+      home: temporaryRoot,
+      port: 0,
+    });
+    assert.equal((await fetch(`${runtime.url}/api/memory`)).status, 401);
+
+    const login = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "owner@example.test", password: "synthetic-test-password" }),
+    });
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+    const headers = { "content-type": "application/json", origin: runtime.url, cookie };
+
+    const empty = await (await fetch(`${runtime.url}/api/memory`, { headers: { cookie } })).json();
+    assert.equal(empty.soul, "");
+    assert.equal(empty.memory, "");
+    assert.equal(empty.updatedAt, null);
+
+    const saved = await fetch(`${runtime.url}/api/memory`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ soul: "你是内容策划", memory: "主推折叠彩虹琴" }),
+    });
+    assert.equal(saved.status, 200);
+    const stored = await saved.json();
+    assert.equal(stored.soul, "你是内容策划");
+    assert.equal(stored.projectId, empty.projectId);
+    assert.equal(
+      (await (await fetch(`${runtime.url}/api/memory`, { headers: { cookie } })).json()).memory,
+      "主推折叠彩虹琴",
+    );
+
+    // Memory belongs to a project: the company root is unaffected by the role's.
+    const { project: role } = await (await fetch(`${runtime.url}/api/projects`, {
+      method: "POST", headers, body: JSON.stringify({ name: "产品经理", type: "child", parentId: empty.projectId }),
+    })).json();
+    await fetch(`${runtime.url}/api/memory`, {
+      method: "POST", headers, body: JSON.stringify({ projectId: role.id, soul: "你是产品经理" }),
+    });
+    const roleMemory = await (await fetch(`${runtime.url}/api/memory?projectId=${role.id}`,
+      { headers: { cookie } })).json();
+    assert.equal(roleMemory.soul, "你是产品经理");
+    assert.equal(roleMemory.memory, "");
+    assert.equal((await (await fetch(`${runtime.url}/api/memory`, { headers: { cookie } })).json()).soul, "你是内容策划");
+
+    // Unknown projects and oversized documents are refused.
+    assert.equal((await fetch(`${runtime.url}/api/memory?projectId=missing`, { headers: { cookie } })).status, 404);
+    assert.equal((await fetch(`${runtime.url}/api/memory`, {
+      method: "POST", headers, body: JSON.stringify({ projectId: "missing", soul: "x" }),
+    })).status, 404);
+    assert.equal((await fetch(`${runtime.url}/api/memory`, {
+      method: "POST", headers, body: JSON.stringify({ soul: "x".repeat(16_001) }),
+    })).status, 400);
+    // A document at the allowed size is accepted (the shared 16 KiB body limit
+    // would have refused it, so this endpoint raises it).
+    const large = await fetch(`${runtime.url}/api/memory`, {
+      method: "POST", headers, body: JSON.stringify({ soul: "中".repeat(16_000) }),
+    });
+    assert.equal(large.status, 200);
+    assert.equal((await large.json()).soul.length, 16_000);
+    // Saving the oversized document must not have replaced the good one.
+    await fetch(`${runtime.url}/api/memory`, {
+      method: "POST", headers, body: JSON.stringify({ soul: "你是内容策划", memory: "主推折叠彩虹琴" }),
+    });
+
+    // The saved memory is replayed as a system message ahead of the history.
+    const { conversation } = await (await fetch(`${runtime.url}/api/conversations`, {
+      method: "POST", headers, body: "{}",
+    })).json();
+    const replied = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST", headers, body: JSON.stringify({ conversationId: conversation.id, content: "今天做什么" }),
+    });
+    assert.equal(replied.status, 200);
+    await replied.text();
+    assert.equal(seen[0][0].role, "system");
+    assert.match(seen[0][0].content, /\[Agent 记忆 · 系统自动注入\]/u);
+    assert.match(seen[0][0].content, /你是内容策划/u);
+    assert.deepEqual(seen[0].slice(1), [{ role: "user", content: "今天做什么" }]);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("runtime command starts, answers health checks, logs, and shuts down cleanly", async () => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-cli-"));
   const dataDirectory = path.join(temporaryRoot, "data");
