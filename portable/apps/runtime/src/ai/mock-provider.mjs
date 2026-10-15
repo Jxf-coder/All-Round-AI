@@ -13,12 +13,14 @@ function buildReply(messages) {
     : "这是「All Round AI 工作台」的演示回复。";
 }
 
-// Default timings are intentionally small so tests finish quickly; callers can
-// override via options to simulate a real provider's latency.
+// The mock streams in small chunks with a short pause so the workbench can be
+// exercised the way a real provider behaves: tokens appear progressively and a
+// reply can actually be stopped mid-flight. Tests override these when they want
+// instantaneous or slower output.
 export function createMockAiProvider(options = {}) {
   const delayMs = options.delayMs ?? 0;
-  const streamChunkSize = options.chunkSize ?? 4;
-  const streamDelayMs = options.streamDelayMs ?? 0;
+  const streamChunkSize = options.chunkSize ?? 3;
+  const streamDelayMs = options.streamDelayMs ?? 20;
 
   const provider = {
     id: "mock",

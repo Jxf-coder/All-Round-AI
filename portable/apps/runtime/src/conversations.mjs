@@ -136,6 +136,19 @@ export async function createConversationStore(filePath) {
         return { ...message };
       });
     },
+    // Used by "retry": the trailing answer is dropped so the same question can
+    // be asked again without duplicating the user turn.
+    async dropTrailingAssistant(ownerId, conversationId) {
+      if (typeof ownerId !== "string" || !ownerId) throw new TypeError("A conversation owner is required");
+      return store.update((document) => {
+        const conversation = document.conversations.find((item) => item.id === conversationId);
+        if (!conversation || conversation.ownerId !== ownerId) return null;
+        if (conversation.messages.at(-1)?.role !== "assistant") return false;
+        conversation.messages.pop();
+        conversation.updatedAt = new Date().toISOString();
+        return true;
+      });
+    },
     async remove(ownerId, conversationId) {
       if (typeof ownerId !== "string" || !ownerId) throw new TypeError("A conversation owner is required");
       return store.update((document) => {

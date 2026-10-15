@@ -31,6 +31,17 @@ function startConversation(initialText = "") {
 // account server-side.
 // ---------------------------------------------------------------------------
 let activeConversationId = null;
+// The in-flight reply, if any: { controller, target }. Its presence is what
+// turns the send button into a stop button.
+let activeStream = null;
+const sendButton = $(".send-button");
+
+function setStreaming(on) {
+  sendButton.classList.toggle("streaming", on);
+  sendButton.textContent = on ? "■" : "↑";
+  sendButton.title = on ? "停止生成" : "发送";
+  sendButton.setAttribute("aria-label", on ? "停止生成" : "发送消息");
+}
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(path, {
@@ -98,6 +109,9 @@ function renderHistory(conversations) {
   }
 }
 
+// The stored conversation is the source of truth for what is on screen, so the
+// view is re-rendered from the API after every turn instead of being assembled
+// locally (which would drift from what the server actually kept).
 async function openConversation(id) {
   const response = await apiRequest(`/api/conversations/${encodeURIComponent(id)}`);
   if (!response?.ok) return;
@@ -108,7 +122,51 @@ async function openConversation(id) {
   for (const message of document_.messages) {
     appendMessage(message.role === "user" ? "" : "assistant-message", message.content);
   }
+  renderReplyActions(document_.messages);
   await loadHistory();
+}
+
+// Retry is offered on the last answer only: regenerating an older turn would
+// leave the following turns inconsistent with it.
+function renderReplyActions(messages) {
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant" || activeStream) return;
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "message-action";
+  retry.textContent = "重新生成";
+  retry.addEventListener("click", () => void regenerateLastReply());
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "message-action";
+  copy.textContent = "复制";
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(last.content);
+      copy.textContent = "已复制";
+      setTimeout(() => { copy.textContent = "复制"; }, 1500);
+    } catch {
+      copy.textContent = "复制失败";
+    }
+  });
+  actions.append(retry, copy);
+  conversation.append(actions);
+  conversation.scrollTop = conversation.scrollHeight;
+}
+
+async function regenerateLastReply() {
+  if (activeStream || !activeConversationId) return;
+  activeStream = { controller: new AbortController(), target: appendMessage("assistant-message") };
+  setStreaming(true);
+  try {
+    await streamReply({ conversationId: activeConversationId, retry: true }, activeStream);
+  } finally {
+    activeStream = null;
+    setStreaming(false);
+  }
+  await openConversation(activeConversationId);
 }
 
 async function ensureConversation() {
@@ -118,20 +176,6 @@ async function ensureConversation() {
   const { conversation: created } = await response.json();
   activeConversationId = created.id;
   return activeConversationId;
-}
-
-async function saveMessage(role, content) {
-  const id = await ensureConversation();
-  if (!id) return false;
-  const response = await apiRequest(`/api/conversations/${encodeURIComponent(id)}/messages`, {
-    method: "POST",
-    body: JSON.stringify({ role, content }),
-  });
-  if (!response) return false;
-  // The body is drained even though only the status matters, so the request is
-  // never left half-read (which browsers report as an aborted request).
-  await response.json().catch(() => null);
-  return response.ok;
 }
 
 function appendMessage(className, text = "") {
@@ -226,33 +270,37 @@ function openModelMenu() {
   modelButton.setAttribute("aria-expanded", "true");
 }
 
-// Consumes the /api/ai/chat/stream SSE endpoint and renders deltas as they
-// arrive. Falls back to a plain notice when no provider is reachable, so the
-// prototype never shows a broken conversation.
-async function requestReply(text, target) {
+// Consumes the /api/ai/chat/stream SSE endpoint. The server owns the exchange
+// (it appends the question, replays context and stores the answer), so this
+// only renders deltas and reports how the turn ended.
+async function streamReply(payload, stream) {
   let response;
   try {
     response = await fetch("/api/ai/chat/stream", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: text }] }),
+      body: JSON.stringify(payload),
+      signal: stream.controller.signal,
     });
-  } catch {
-    target.textContent = "无法连接本地 AI 服务，请确认运行时仍在运行。";
-    return null;
+  } catch (error) {
+    if (error.name === "AbortError") return "cancelled";
+    stream.target.textContent = "无法连接本地 AI 服务，请确认运行时仍在运行。";
+    return "failed";
   }
   if (response.status === 401) {
     location.href = "/login?next=" + encodeURIComponent(location.pathname);
-    return null;
+    return "failed";
   }
   if (!response.ok || !response.body) {
-    target.textContent = "AI 服务暂时不可用，请稍后重试。";
-    return null;
+    const failure = await response.json().catch(() => ({}));
+    stream.target.textContent = failure.error || "AI 服务暂时不可用，请稍后重试。";
+    return "failed";
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let answer = "";
+  let outcome = "done";
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -262,35 +310,62 @@ async function requestReply(text, target) {
     for (const event of events) {
       const line = event.split("\n").find((item) => item.startsWith("data: "));
       if (!line) continue;
-      let payload;
-      try { payload = JSON.parse(line.slice(6)); } catch { continue; }
-      if (payload.delta) { answer += payload.delta; target.textContent = answer; }
-      if (payload.error) { target.textContent = payload.error; return null; }
+      let chunk;
+      try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
+      if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
+      if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
+      if (chunk.done && chunk.cancelled) outcome = "cancelled";
       conversation.scrollTop = conversation.scrollHeight;
     }
   }
-  if (!answer) target.textContent = "AI 服务未返回内容。";
-  return answer || null;
+  if (outcome === "done" && !answer) {
+    stream.target.textContent = "AI 服务未返回内容。";
+    outcome = "failed";
+  }
+  return outcome;
 }
+
+// Guards against a double submit: Enter plus a click, or two fast presses, can
+// both reach the handler before the first one has created its conversation.
+let submitInFlight = false;
 
 async function submitMessage(event) {
   event?.preventDefault();
+  if (submitInFlight || activeStream) return;
   const text = prompt.value.trim();
   if (!text) return;
-  welcome.classList.add("hidden");
-  appendMessage("", text);
-  const reply = appendMessage("assistant-message");
-  reply.dataset.pending = "true";
-  prompt.value = "";
-  prompt.dispatchEvent(new Event("input"));
-  await saveMessage("user", text);
-  const answer = await requestReply(text, reply);
-  delete reply.dataset.pending;
-  if (answer) await saveMessage("assistant", answer);
-  await loadHistory();
+  submitInFlight = true;
+  try {
+    const id = await ensureConversation();
+    if (!id) return;
+    welcome.classList.add("hidden");
+    appendMessage("", text);
+    activeStream = { controller: new AbortController(), target: appendMessage("assistant-message") };
+    setStreaming(true);
+    prompt.value = "";
+    prompt.dispatchEvent(new Event("input"));
+    try {
+      await streamReply({ conversationId: id, content: text }, activeStream);
+    } finally {
+      activeStream = null;
+      setStreaming(false);
+    }
+    // Re-render from storage so a cancelled or failed turn still shows exactly
+    // what the server kept.
+    await openConversation(id);
+  } finally {
+    submitInFlight = false;
+  }
 }
 
 $("#composer-form").addEventListener("submit", submitMessage);
+// While a reply streams the same button stops it; preventDefault keeps the
+// click from also submitting the composer.
+sendButton.addEventListener("click", (event) => {
+  if (!activeStream) return;
+  event.preventDefault();
+  activeStream.controller.abort();
+});
 prompt.addEventListener("input", () => {
   prompt.style.height = "auto";
   prompt.style.height = `${Math.min(prompt.scrollHeight, 150)}px`;

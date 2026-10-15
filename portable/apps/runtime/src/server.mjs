@@ -24,6 +24,8 @@ const CONTENT_TYPES = new Map([
 ]);
 const CONTENT_SECURITY_POLICY =
   "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+// How many prior turns are replayed to the provider as context.
+const MAX_CONTEXT_MESSAGES = 20;
 
 // Client-side routes rendered inside the workbench shell. These paths have no
 // dedicated static file and must fall back to workbench.html so the frontend
@@ -292,7 +294,8 @@ export async function startLocalRuntime(options = {}) {
   // tokens as they arrive. Aborts propagate through the request signal, which
   // cancels the underlying provider generator.
   router.post("/api/ai/chat/stream", async (ctx) => {
-    if (!(await requireActor(ctx))) return true;
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
     let body;
     try {
       body = await readJsonBody(ctx.request);
@@ -300,30 +303,88 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
       return true;
     }
+    const ownerId = String(actor.id);
+    const conversationId = typeof body.conversationId === "string" ? body.conversationId : "";
+    if (!conversationId) {
+      json(ctx.response, 400, { error: "缺少 conversationId" });
+      return true;
+    }
+    const retry = body.retry === true;
+    if (retry) {
+      // Regenerate the last answer: drop it first so the user turn is not
+      // duplicated, then reply from the remaining history.
+      const dropped = await conversationStore.dropTrailingAssistant(ownerId, conversationId);
+      if (dropped === null) {
+        json(ctx.response, 404, { error: "对话不存在" });
+        return true;
+      }
+    } else {
+      let appended;
+      try {
+        appended = await conversationStore.appendMessage(ownerId, conversationId, {
+          role: "user",
+          content: body.content,
+        });
+      } catch (error) {
+        json(ctx.response, 400, { error: error.message || "消息格式错误" });
+        return true;
+      }
+      if (!appended) {
+        json(ctx.response, 404, { error: "对话不存在" });
+        return true;
+      }
+    }
+
+    // The stored conversation is the single source of truth for context, so the
+    // client cannot disagree with what was actually said.
+    const conversation = await conversationStore.get(ownerId, conversationId);
+    const messages = conversation.messages
+      .slice(-MAX_CONTEXT_MESSAGES)
+      .map((message) => ({ role: message.role, content: message.content }));
+    if (messages.at(-1)?.role !== "user") {
+      json(ctx.response, 400, { error: "没有可回复的消息" });
+      return true;
+    }
+
     const { response } = ctx;
     response.writeHead(200, {
       "cache-control": "no-store",
       "content-type": "text/event-stream; charset=utf-8",
       "x-content-type-options": "nosniff",
-      "connection": "keep-alive",
     });
     const send = (payload) => {
       if (!response.destroyed && !response.writableEnded) {
         response.write(`data: ${JSON.stringify(payload)}\n\n`);
       }
     };
+    let answer = "";
+    let cancelled = false;
     try {
       for await (const chunk of aiProvider.streamChat({
-        model: body.model,
-        messages: body.messages,
+        model: await aiSettings.currentModel(),
+        messages,
         signal: ctx.signal,
       })) {
-        if (chunk.delta) send({ delta: chunk.delta });
+        if (chunk.delta) {
+          answer += chunk.delta;
+          send({ delta: chunk.delta });
+        }
         if (chunk.finishReason) send({ finishReason: chunk.finishReason });
       }
     } catch (error) {
-      if (error.name !== "AbortError") send({ error: "AI 服务暂时不可用" });
+      if (error.name === "AbortError") cancelled = true;
+      else send({ error: "AI 服务暂时不可用" });
     }
+    // A partial reply is kept: stopping should not throw away what the user
+    // already read, and a cancelled turn stays inspectable.
+    if (answer.trim()) {
+      try {
+        await conversationStore.appendMessage(ownerId, conversationId, { role: "assistant", content: answer });
+      } catch {
+        // The conversation could have been deleted mid-stream; nothing to store.
+      }
+    }
+    send({ done: true, cancelled });
     if (!response.destroyed) response.end();
     return true;
   });
@@ -361,34 +422,6 @@ export async function startLocalRuntime(options = {}) {
       return true;
     }
     json(ctx.response, 200, { conversation });
-    return true;
-  });
-
-  router.post("/api/conversations/:id/messages", async (ctx) => {
-    const actor = await requireActor(ctx);
-    if (!actor) return true;
-    let body;
-    try {
-      body = await readJsonBody(ctx.request);
-    } catch (error) {
-      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
-      return true;
-    }
-    let message;
-    try {
-      message = await conversationStore.appendMessage(String(actor.id), ctx.params.id, {
-        role: body.role,
-        content: body.content,
-      });
-    } catch (error) {
-      json(ctx.response, 400, { error: error.message || "消息格式错误" });
-      return true;
-    }
-    if (!message) {
-      json(ctx.response, 404, { error: "对话不存在" });
-      return true;
-    }
-    json(ctx.response, 201, { message });
     return true;
   });
 

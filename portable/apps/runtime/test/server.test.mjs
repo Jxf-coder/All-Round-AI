@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { startLocalRuntime } from "../src/server.mjs";
+import { createMockAiProvider } from "../src/ai/mock-provider.mjs";
 import { startManagedProcess, stopManagedProcess } from "../../../packages/platform/src/processes.mjs";
 
 test("local runtime serves health only on loopback and logs its lifecycle", async () => {
@@ -183,16 +184,32 @@ test("runtime falls back to the workbench shell for client routes and serves the
     assert.equal(chatPayload.finishReason, "stop");
     assert.match(chatPayload.content, /你好/);
 
+    const created = await fetch(`${runtime.url}/api/conversations`, {
+      method: "POST", headers: { "content-type": "application/json", origin: runtime.url, cookie }, body: "{}",
+    });
+    assert.equal(created.status, 201);
+    const conversationId = (await created.json()).conversation.id;
+
+    // Streaming requires an explicit conversation so the server can own context
+    // and persistence.
+    const withoutConversation = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ content: "没有对话" }),
+    });
+    assert.equal(withoutConversation.status, 400);
+
     const stream = await fetch(`${runtime.url}/api/ai/chat/stream`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: runtime.url, cookie },
-      body: JSON.stringify({ messages: [{ role: "user", content: "流式测试" }] }),
+      body: JSON.stringify({ conversationId, content: "流式测试" }),
     });
     assert.equal(stream.status, 200);
     assert.match(stream.headers.get("content-type"), /text\/event-stream/);
     const streamBody = await stream.text();
     assert.match(streamBody, /^data: /m);
     assert.match(streamBody, /"finishReason":"stop"/);
+    assert.match(streamBody, /"done":true/);
     // Deltas are split across SSE frames, so the reply is reassembled to check
     // that the full text (including the user's question) survives streaming.
     const streamed = streamBody
@@ -204,6 +221,29 @@ test("runtime falls back to the workbench shell for client routes and serves the
       .join("");
     assert.match(streamed, /流式测试/);
 
+    // The server stored both turns and replays them as context next time.
+    const detail = await (await fetch(`${runtime.url}/api/conversations/${conversationId}`,
+      { headers: { cookie } })).json();
+    assert.equal(detail.conversation.messages.length, 2);
+    assert.equal(detail.conversation.messages[0].role, "user");
+    assert.equal(detail.conversation.messages[0].content, "流式测试");
+    assert.equal(detail.conversation.messages[1].role, "assistant");
+    assert.equal(detail.conversation.messages[1].content, streamed);
+    assert.equal(detail.conversation.title, "流式测试");
+
+    // Retry regenerates the last answer without duplicating the question.
+    const retried = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ conversationId, retry: true }),
+    });
+    assert.equal(retried.status, 200);
+    await retried.text();
+    const afterRetry = await (await fetch(`${runtime.url}/api/conversations/${conversationId}`,
+      { headers: { cookie } })).json();
+    assert.equal(afterRetry.conversation.messages.length, 2);
+    assert.equal(afterRetry.conversation.messages[1].role, "assistant");
+
     // A JSON endpoint rejects non-JSON bodies with 415.
     const badBody = await fetch(`${runtime.url}/api/ai/chat`, {
       method: "POST",
@@ -213,6 +253,139 @@ test("runtime falls back to the workbench shell for client routes and serves the
     assert.equal(badBody.status, 415);
 
     assert.match(deepRoute.headers.get("x-request-id"), /^[0-9a-f]{32}$/);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("the provider receives the stored conversation as context", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-context-"));
+  const seen = [];
+  let runtime;
+  try {
+    // Records what the provider is actually asked, so "context is replayed" is a
+    // verified claim rather than an assumption.
+    const recording = {
+      id: "recording",
+      label: "Recording",
+      async listModels() { return [{ id: "recording-1", name: "Recording" }]; },
+      async chat({ messages }) { seen.push(messages); return { content: "ok", finishReason: "stop" }; },
+      async *streamChat({ messages }) {
+        seen.push(messages);
+        yield { delta: "收到" };
+        yield { finishReason: "stop" };
+      },
+    };
+    runtime = await startLocalRuntime({
+      aiProvider: recording,
+      authProvider: async () => ({
+        ok: true,
+        user: { id: "context-user", name: "Context User", role: "admin", source: "all-round-ai" },
+        landing: "/",
+      }),
+      env: { ALLROUND_AI_DATA_DIR: path.join(temporaryRoot, "data") },
+      home: temporaryRoot,
+      port: 0,
+    });
+    const login = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "context@example.test", password: "synthetic-test-password" }),
+    });
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+    const headers = { "content-type": "application/json", origin: runtime.url, cookie };
+    const created = await fetch(`${runtime.url}/api/conversations`, { method: "POST", headers, body: "{}" });
+    const conversationId = (await created.json()).conversation.id;
+
+    const ask = async (content) => {
+      const response = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+        method: "POST", headers, body: JSON.stringify({ conversationId, content }),
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+    };
+
+    await ask("第一个问题");
+    assert.deepEqual(seen[0], [{ role: "user", content: "第一个问题" }]);
+
+    // The second turn carries the earlier exchange, not just the new question.
+    await ask("第二个问题");
+    assert.deepEqual(seen[1], [
+      { role: "user", content: "第一个问题" },
+      { role: "assistant", content: "收到" },
+      { role: "user", content: "第二个问题" },
+    ]);
+
+    // Retry replays the same history without adding a second question.
+    const retried = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST", headers, body: JSON.stringify({ conversationId, retry: true }),
+    });
+    assert.equal(retried.status, 200);
+    await retried.text();
+    assert.deepEqual(seen[2], [
+      { role: "user", content: "第一个问题" },
+      { role: "assistant", content: "收到" },
+      { role: "user", content: "第二个问题" },
+    ]);
+  } finally {
+    if (runtime) await runtime.close().catch(() => {});
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("stopping a reply keeps the partial answer and marks the turn cancelled", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-runtime-stop-"));
+  let runtime;
+  try {
+    runtime = await startLocalRuntime({
+      // A slow stream is required to interrupt it mid-answer.
+      aiProvider: createMockAiProvider({ chunkSize: 2, streamDelayMs: 25 }),
+      authProvider: async () => ({
+        ok: true,
+        user: { id: "stop-user", name: "Stop User", role: "admin", source: "all-round-ai" },
+        landing: "/",
+      }),
+      env: { ALLROUND_AI_DATA_DIR: path.join(temporaryRoot, "data") },
+      home: temporaryRoot,
+      port: 0,
+    });
+    const login = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url },
+      body: JSON.stringify({ user: "stop@example.test", password: "synthetic-test-password" }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+
+    const created = await fetch(`${runtime.url}/api/conversations`, {
+      method: "POST", headers: { "content-type": "application/json", origin: runtime.url, cookie }, body: "{}",
+    });
+    const conversationId = (await created.json()).conversation.id;
+
+    const controller = new AbortController();
+    const stream = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ conversationId, content: "请给一个较长的回答" }),
+      signal: controller.signal,
+    });
+    assert.equal(stream.status, 200);
+    const reader = stream.body.getReader();
+    await reader.read();
+    controller.abort();
+    await reader.cancel().catch(() => {});
+
+    // Give the server a moment to finish storing the interrupted turn.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const detail = await (await fetch(`${runtime.url}/api/conversations/${conversationId}`,
+      { headers: { cookie } })).json();
+    assert.equal(detail.conversation.messages.length, 2);
+    assert.equal(detail.conversation.messages[0].content, "请给一个较长的回答");
+    const partial = detail.conversation.messages[1];
+    assert.equal(partial.role, "assistant");
+    assert.equal(partial.content.length > 0, true);
+    assert.equal(partial.content.length < 60, true, "the interrupted answer must be shorter than the full reply");
   } finally {
     if (runtime) await runtime.close().catch(() => {});
     await rm(temporaryRoot, { recursive: true, force: true });
@@ -303,17 +476,18 @@ test("conversation history is persisted per account through the API", async () =
     const { conversation } = await created.json();
     assert.equal(conversation.title, "新对话");
 
-    const appended = await fetch(`${runtime.url}/api/conversations/${conversation.id}/messages`, {
+    const replied = await fetch(`${runtime.url}/api/ai/chat/stream`, {
       method: "POST",
       headers: jsonHeaders(owner),
-      body: JSON.stringify({ role: "user", content: "把季度目标拆成周计划" }),
+      body: JSON.stringify({ conversationId: conversation.id, content: "把季度目标拆成周计划" }),
     });
-    assert.equal(appended.status, 201);
+    assert.equal(replied.status, 200);
+    await replied.text();
 
     const detail = await (await fetch(`${runtime.url}/api/conversations/${conversation.id}`,
       { headers: { cookie: owner } })).json();
     assert.equal(detail.conversation.title, "把季度目标拆成周计划");
-    assert.equal(detail.conversation.messages.length, 1);
+    assert.equal(detail.conversation.messages.length, 2);
 
     // The stored history is scoped to the signed-in account.
     const stranger = await login("stranger@example.test");
@@ -323,11 +497,22 @@ test("conversation history is persisted per account through the API", async () =
     assert.equal((await fetch(`${runtime.url}/api/conversations/${conversation.id}`, {
       method: "DELETE", headers: { cookie: stranger },
     })).status, 404);
+    // A stranger cannot post into someone else's conversation either.
+    assert.equal((await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST",
+      headers: jsonHeaders(stranger),
+      body: JSON.stringify({ conversationId: conversation.id, content: "越权提问" }),
+    })).status, 404);
 
-    const rejected = await fetch(`${runtime.url}/api/conversations/${conversation.id}/messages`, {
-      method: "POST", headers: jsonHeaders(owner), body: JSON.stringify({ role: "system", content: "x" }),
+    const emptyContent = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST",
+      headers: jsonHeaders(owner),
+      body: JSON.stringify({ conversationId: conversation.id, content: "   " }),
     });
-    assert.equal(rejected.status, 400);
+    assert.equal(emptyContent.status, 400);
+    // The refused attempts must not have touched the conversation.
+    assert.equal((await (await fetch(`${runtime.url}/api/conversations/${conversation.id}`,
+      { headers: { cookie: owner } })).json()).conversation.messages.length, 2);
 
     const removed = await fetch(`${runtime.url}/api/conversations/${conversation.id}`, {
       method: "DELETE", headers: { cookie: owner },

@@ -65,6 +65,27 @@ test("conversations are scoped to their owner", async () => {
   });
 });
 
+test("the trailing answer can be dropped for a retry", async () => {
+  await withStore(async ({ store }) => {
+    const { id } = await store.create("user-1");
+    assert.equal(await store.dropTrailingAssistant("user-1", id), false, "nothing to drop yet");
+
+    await store.appendMessage("user-1", id, { role: "user", content: "问题" });
+    assert.equal(await store.dropTrailingAssistant("user-1", id), false, "the trailing turn is the question");
+
+    await store.appendMessage("user-1", id, { role: "assistant", content: "第一次回答" });
+    assert.equal(await store.dropTrailingAssistant("user-1", id), true);
+    const afterDrop = await store.get("user-1", id);
+    assert.equal(afterDrop.messages.length, 1);
+    assert.equal(afterDrop.messages[0].role, "user");
+    // The question survives, so the retry does not duplicate it.
+    assert.equal((await store.dropTrailingAssistant("user-1", id)), false);
+
+    assert.equal(await store.dropTrailingAssistant("user-1", "missing"), null);
+    assert.equal(await store.dropTrailingAssistant("user-2", id), null);
+  });
+});
+
 test("message payloads are validated", async () => {
   await withStore(async ({ store }) => {
     const { id } = await store.create("user-1");
