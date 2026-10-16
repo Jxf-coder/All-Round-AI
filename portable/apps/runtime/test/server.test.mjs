@@ -384,21 +384,41 @@ test("stopping a reply keeps the partial answer and marks the turn cancelled", a
     });
     const conversationId = (await created.json()).conversation.id;
 
-    const controller = new AbortController();
     const stream = await fetch(`${runtime.url}/api/ai/chat/stream`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: runtime.url, cookie },
       body: JSON.stringify({ conversationId, content: "请给一个较长的回答" }),
-      signal: controller.signal,
     });
     assert.equal(stream.status, 200);
     const reader = stream.body.getReader();
-    await reader.read();
-    controller.abort();
-    await reader.cancel().catch(() => {});
+    const decoder = new TextDecoder();
+    // Wait for the first token so the cancelled answer is a real partial reply
+    // rather than an empty turn cancelled before anything was produced.
+    let body = "";
+    while (!body.includes('"delta"')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      body += decoder.decode(value, { stream: true });
+    }
+    assert.match(body, /"delta"/);
+    // Stopping is now an explicit cancel of the turn: closing the socket alone
+    // no longer stops it, so the cancel must be sent for the reply to end.
+    const cancelled = await fetch(`${runtime.url}/api/ai/chat/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ conversationId }),
+    });
+    assert.equal(cancelled.status, 200);
+    assert.deepEqual(await cancelled.json(), { ok: true, cancelled: true });
 
-    // Give the server a moment to finish storing the interrupted turn.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The original stream observes the terminal state instead of being cut off.
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      body += decoder.decode(value, { stream: true });
+    }
+    assert.match(body, /"status":"cancelled"/);
+
     const detail = await (await fetch(`${runtime.url}/api/conversations/${conversationId}`,
       { headers: { cookie } })).json();
     assert.equal(detail.conversation.messages.length, 2);
@@ -406,7 +426,23 @@ test("stopping a reply keeps the partial answer and marks the turn cancelled", a
     const partial = detail.conversation.messages[1];
     assert.equal(partial.role, "assistant");
     assert.equal(partial.content.length > 0, true);
-    assert.equal(partial.content.length < 60, true, "the interrupted answer must be shorter than the full reply");
+
+    // A second, uninterrupted reply gives the full text, so "the partial answer
+    // was kept" is checked against the real thing instead of a magic length.
+    const second = await (await fetch(`${runtime.url}/api/conversations`, {
+      method: "POST", headers: { "content-type": "application/json", origin: runtime.url, cookie }, body: "{}",
+    })).json();
+    const fullStream = await fetch(`${runtime.url}/api/ai/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: runtime.url, cookie },
+      body: JSON.stringify({ conversationId: second.conversation.id, content: "请给一个较长的回答" }),
+    });
+    await fullStream.text();
+    const fullDetail = await (await fetch(`${runtime.url}/api/conversations/${second.conversation.id}`,
+      { headers: { cookie } })).json();
+    const full = fullDetail.conversation.messages[1].content;
+    assert.equal(full.startsWith(partial.content), true, "the kept answer must be a prefix of the full reply");
+    assert.equal(partial.content.length < full.length, true, "the interrupted answer must be shorter than the full reply");
   } finally {
     if (runtime) await runtime.close().catch(() => {});
     await rm(temporaryRoot, { recursive: true, force: true });

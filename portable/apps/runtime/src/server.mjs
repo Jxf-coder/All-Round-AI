@@ -17,6 +17,7 @@ import { buildKnowledgeBlock, createKnowledgeStore } from "./knowledge.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
+import { TERMINAL_TURN_STATUSES, createTurnManager } from "./ai/turns.mjs";
 import { createRouter, json, readJsonBody } from "./router.mjs";
 
 const DEFAULT_PORT = 3141;
@@ -156,6 +157,12 @@ export async function startLocalRuntime(options = {}) {
     ?? await createMemoryStore(path.join(directories.config, "memory.json"));
   const knowledgeStore = options.knowledgeStore
     ?? await createKnowledgeStore(path.join(directories.config, "knowledge.json"));
+  // In-flight chat turns outlive the request that started them, so they get
+  // their own log. Recovery closes turns that were running when the previous
+  // process exited, instead of leaving them "running" forever.
+  const turnStore = options.turnStore
+    ?? createTurnManager({ filePath: path.join(directories.config, "chat-turns.json") });
+  await turnStore.recover();
 
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
@@ -175,6 +182,46 @@ export async function startLocalRuntime(options = {}) {
   async function readOptionalJsonBody(ctx, options) {
     if (!ctx.request.headers["content-type"]) return {};
     return readJsonBody(ctx.request, options);
+  }
+
+  // Opens a Server-Sent Events response and returns a guarded writer. Writing
+  // after the client is gone is skipped rather than thrown, because a turn
+  // deliberately keeps running when its browser disconnects.
+  function openEventStream(ctx) {
+    const { response } = ctx;
+    response.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": "text/event-stream; charset=utf-8",
+      "x-content-type-options": "nosniff",
+    });
+    return (payload) => {
+      if (!response.destroyed && !response.writableEnded) {
+        response.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }
+    };
+  }
+
+  // Replays a running turn from `after`, then streams it live. Resolves once the
+  // turn reaches a terminal state or the client goes away.
+  function followTurn(ctx, turnId, after, send) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let unsubscribe = () => {};
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        unsubscribe();
+        resolve();
+      };
+      unsubscribe = turnStore.subscribe(turnId, (event) => {
+        send(event);
+        if (event.done) settle();
+      }, { after });
+      // `subscribe` replays synchronously, so a finished turn is already done.
+      const status = turnStore.statusOf(turnId);
+      if (status === undefined || TERMINAL_TURN_STATUSES.includes(status)) settle();
+      ctx.signal.addEventListener("abort", settle, { once: true });
+    });
   }
 
   const router = createRouter({ fallback: guardedWorkbench });
@@ -300,8 +347,9 @@ export async function startLocalRuntime(options = {}) {
   });
 
   // Streaming variant. Emits Server-Sent Events so the workbench can render
-  // tokens as they arrive. Aborts propagate through the request signal, which
-  // cancels the underlying provider generator.
+  // tokens as they arrive. The turn is owned by the runtime rather than by this
+  // connection: a refresh no longer cancels the answer, and only an explicit
+  // cancel (POST /api/ai/chat/cancel) stops it, keeping the partial reply.
   router.post("/api/ai/chat/stream", async (ctx) => {
     const actor = await requireActor(ctx);
     if (!actor) return true;
@@ -318,7 +366,30 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, 400, { error: "缺少 conversationId" });
       return true;
     }
+    const clientTurnId = typeof body.clientTurnId === "string" && body.clientTurnId
+      ? body.clientTurnId.slice(0, 80)
+      : null;
     const retry = body.retry === true;
+
+    // A resent request (same clientTurnId) is answered from the turn it already
+    // started instead of generating a second reply and duplicating the question.
+    if (clientTurnId) {
+      const existing = await turnStore.findByClientTurnId({ ownerId, conversationId, clientTurnId });
+      if (existing) {
+        const send = openEventStream(ctx);
+        send({ meta: { turnId: existing.id, conversationId, clientTurnId, status: existing.status } });
+        if (TERMINAL_TURN_STATUSES.includes(existing.status)) {
+          if (existing.text) send({ delta: existing.text });
+          send({ done: true, status: existing.status, cancelled: existing.status === "cancelled" });
+          if (!ctx.response.destroyed) ctx.response.end();
+          return true;
+        }
+        await followTurn(ctx, existing.id, 0, send);
+        if (!ctx.response.destroyed) ctx.response.end();
+        return true;
+      }
+    }
+
     if (retry) {
       // Regenerate the last answer: drop it first so the user turn is not
       // duplicated, then reply from the remaining history.
@@ -363,37 +434,40 @@ export async function startLocalRuntime(options = {}) {
       return true;
     }
 
-    const { response } = ctx;
-    response.writeHead(200, {
-      "cache-control": "no-store",
-      "content-type": "text/event-stream; charset=utf-8",
-      "x-content-type-options": "nosniff",
-    });
-    const send = (payload) => {
-      if (!response.destroyed && !response.writableEnded) {
-        response.write(`data: ${JSON.stringify(payload)}\n\n`);
-      }
-    };
+    const turn = await turnStore.begin({ ownerId, conversationId, projectId, clientTurnId });
+    const send = openEventStream(ctx);
+    send({ meta: { turnId: turn.id, conversationId, clientTurnId, status: "running" } });
+
     let answer = "";
-    let cancelled = false;
+    let outcome = "done";
     try {
       for await (const chunk of aiProvider.streamChat({
         model: await aiSettings.currentModel(),
         messages,
-        signal: ctx.signal,
+        // The turn's own signal, not the request's: a client disconnect must not
+        // stop the reply.
+        signal: turnStore.signalFor(turn.id),
       })) {
         if (chunk.delta) {
           answer += chunk.delta;
+          turnStore.append(turn.id, { delta: chunk.delta });
           send({ delta: chunk.delta });
         }
-        if (chunk.finishReason) send({ finishReason: chunk.finishReason });
+        if (chunk.finishReason) {
+          turnStore.append(turn.id, { finishReason: chunk.finishReason });
+          send({ finishReason: chunk.finishReason });
+        }
       }
     } catch (error) {
-      if (error.name === "AbortError") cancelled = true;
-      else send({ error: "AI 服务暂时不可用" });
+      if (error.name === "AbortError" || turnStore.isCancelled(turn.id)) outcome = "cancelled";
+      else {
+        outcome = "error";
+        send({ error: "AI 服务暂时不可用" });
+      }
     }
     // A partial reply is kept: stopping should not throw away what the user
-    // already read, and a cancelled turn stays inspectable.
+    // already read. Because the turn outlives this connection, the answer is
+    // stored even when the browser is already gone.
     if (answer.trim()) {
       try {
         await conversationStore.appendMessage(ownerId, conversationId, { role: "assistant", content: answer });
@@ -401,8 +475,78 @@ export async function startLocalRuntime(options = {}) {
         // The conversation could have been deleted mid-stream; nothing to store.
       }
     }
-    send({ done: true, cancelled });
-    if (!response.destroyed) response.end();
+    await turnStore.finish(turn.id, { status: outcome });
+    send({ done: true, status: outcome, cancelled: outcome === "cancelled" });
+    if (!ctx.response.destroyed) ctx.response.end();
+    return true;
+  });
+
+  // Live turn surface. Without `stream=1` it answers with a JSON snapshot a
+  // reattaching client uses to render what has been produced so far; with
+  // `stream=1&after=<seq>` it replays buffered events and then follows the turn.
+  router.get("/api/ai/chat/live", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    const ownerId = String(actor.id);
+    const conversationId = ctx.url.searchParams.get("conversationId") ?? "";
+    if (!conversationId) {
+      json(ctx.response, 400, { error: "缺少 conversationId" });
+      return true;
+    }
+    if (!(await conversationStore.get(ownerId, conversationId))) {
+      json(ctx.response, 404, { error: "对话不存在" });
+      return true;
+    }
+    const turn = await turnStore.latestFor(ownerId, conversationId);
+    if (ctx.url.searchParams.get("stream") !== "1") {
+      json(ctx.response, 200, { turn: turn ?? null });
+      return true;
+    }
+    const parsed = Number.parseInt(ctx.url.searchParams.get("after") ?? "0", 10);
+    const after = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    const send = openEventStream(ctx);
+    if (!turn) {
+      send({ done: true, status: "idle" });
+      ctx.response.end();
+      return true;
+    }
+    send({ meta: { turnId: turn.id, conversationId, status: turn.status } });
+    if (TERMINAL_TURN_STATUSES.includes(turn.status)) {
+      send({ done: true, status: turn.status });
+      ctx.response.end();
+      return true;
+    }
+    await followTurn(ctx, turn.id, after, send);
+    if (!ctx.response.destroyed) ctx.response.end();
+    return true;
+  });
+
+  // Stopping is an explicit cancel of the turn rather than a socket close, so
+  // the partial answer is kept and every attached client sees the terminal
+  // state.
+  router.post("/api/ai/chat/cancel", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const ownerId = String(actor.id);
+    const conversationId = typeof body.conversationId === "string" ? body.conversationId : "";
+    if (!conversationId) {
+      json(ctx.response, 400, { error: "缺少 conversationId" });
+      return true;
+    }
+    if (!(await conversationStore.get(ownerId, conversationId))) {
+      json(ctx.response, 404, { error: "对话不存在" });
+      return true;
+    }
+    const requested = typeof body.turnId === "string" && body.turnId ? body.turnId : null;
+    const turnId = requested ?? (await turnStore.latestFor(ownerId, conversationId))?.id ?? null;
+    json(ctx.response, 200, { ok: true, cancelled: turnId ? turnStore.cancel(turnId) : false });
     return true;
   });
 

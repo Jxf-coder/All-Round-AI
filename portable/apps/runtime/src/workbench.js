@@ -39,16 +39,43 @@ function startConversation(initialText = "") {
 // account server-side.
 // ---------------------------------------------------------------------------
 let activeConversationId = null;
-// The in-flight reply, if any: { controller, target }. Its presence is what
-// turns the send button into a stop button.
+// The in-flight reply, if any: { controller, target, conversationId, turnId }.
+// Its presence is what turns the send button into a stop button.
 let activeStream = null;
 const sendButton = $(".send-button");
+
+// A per-send id so a retried request is answered from the turn it already
+// started instead of producing a second reply.
+function newClientTurnId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function setStreaming(on) {
   sendButton.classList.toggle("streaming", on);
   sendButton.textContent = on ? "■" : "↑";
   sendButton.title = on ? "停止生成" : "发送";
   sendButton.setAttribute("aria-label", on ? "停止生成" : "发送消息");
+}
+
+// Stopping is a server-side cancel, not a socket close: the runtime keeps the
+// partial answer and marks the turn cancelled. Aborting the fetch is only a
+// fallback for when the cancel request itself cannot be delivered.
+async function cancelActiveTurn() {
+  const stream = activeStream;
+  if (!stream) return;
+  const payload = { conversationId: stream.conversationId };
+  if (stream.turnId) payload.turnId = stream.turnId;
+  try {
+    const response = await fetch("/api/ai/chat/cancel", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) stream.controller.abort();
+  } catch {
+    stream.controller.abort();
+  }
 }
 
 async function apiRequest(path, options = {}) {
@@ -133,6 +160,9 @@ async function openConversation(id) {
   }
   renderReplyActions(document_.messages);
   await loadHistory();
+  // A reply can still be running on the server after a refresh or a reopen;
+  // reattach to its live stream so the answer keeps appearing.
+  await reattachLiveTurn(document_.id);
 }
 
 // Retry is offered on the last answer only: regenerating an older turn would
@@ -167,10 +197,18 @@ function renderReplyActions(messages) {
 
 async function regenerateLastReply() {
   if (activeStream || !activeConversationId) return;
-  activeStream = { controller: new AbortController(), target: appendMessage("assistant-message") };
+  activeStream = {
+    controller: new AbortController(),
+    target: appendMessage("assistant-message"),
+    conversationId: activeConversationId,
+    turnId: null,
+  };
   setStreaming(true);
   try {
-    await streamReply({ conversationId: activeConversationId, retry: true }, activeStream);
+    await streamReply(
+      { conversationId: activeConversationId, retry: true, clientTurnId: newClientTurnId() },
+      activeStream,
+    );
   } finally {
     activeStream = null;
     setStreaming(false);
@@ -874,9 +912,13 @@ async function streamReply(payload, stream) {
       if (!line) continue;
       let chunk;
       try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
+      if (chunk.meta?.turnId) stream.turnId = chunk.meta.turnId;
       if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
       if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
-      if (chunk.done && chunk.cancelled) outcome = "cancelled";
+      if (chunk.done) {
+        if (chunk.cancelled || chunk.status === "cancelled") outcome = "cancelled";
+        else if (chunk.status === "error") outcome = "failed";
+      }
       conversation.scrollTop = conversation.scrollHeight;
     }
   }
@@ -885,6 +927,80 @@ async function streamReply(payload, stream) {
     outcome = "failed";
   }
   return outcome;
+}
+
+// Follows a turn that is already running on the server, starting from the
+// sequence number a snapshot reported. Used after a refresh or when reopening a
+// conversation whose reply has not finished yet.
+async function followLiveTurn(conversationId, after, stream) {
+  let response;
+  try {
+    response = await fetch(
+      `/api/ai/chat/live?conversationId=${encodeURIComponent(conversationId)}&stream=1&after=${after}`,
+      { signal: stream.controller.signal },
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return "cancelled";
+    stream.target.textContent = "无法连接本地 AI 服务，请确认运行时仍在运行。";
+    return "failed";
+  }
+  if (response.status === 401) {
+    location.href = "/login?next=" + encodeURIComponent(location.pathname);
+    return "failed";
+  }
+  if (!response.ok || !response.body) return "failed";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let answer = stream.target.textContent || "";
+  let outcome = "done";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+    for (const event of events) {
+      const line = event.split("\n").find((item) => item.startsWith("data: "));
+      if (!line) continue;
+      let chunk;
+      try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
+      if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
+      if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
+      if (chunk.done) {
+        if (chunk.status === "cancelled") outcome = "cancelled";
+        else if (chunk.status === "error") outcome = "failed";
+      }
+      conversation.scrollTop = conversation.scrollHeight;
+    }
+  }
+  return outcome;
+}
+
+// Asks the runtime whether the conversation has a reply in flight and, if so,
+// renders what exists so far and follows it to completion.
+async function reattachLiveTurn(conversationId) {
+  if (activeStream) return;
+  let response;
+  try {
+    response = await apiRequest(`/api/ai/chat/live?conversationId=${encodeURIComponent(conversationId)}`);
+  } catch {
+    return;
+  }
+  if (!response?.ok) return;
+  const { turn } = await response.json().catch(() => ({}));
+  if (!turn || turn.status !== "running") return;
+  const target = appendMessage("assistant-message", turn.text || "");
+  activeStream = { controller: new AbortController(), target, conversationId, turnId: turn.id };
+  setStreaming(true);
+  try {
+    await followLiveTurn(conversationId, turn.seq || 0, activeStream);
+  } finally {
+    activeStream = null;
+    setStreaming(false);
+    // Re-render from storage so the finished answer replaces the streaming bubble.
+    await openConversation(conversationId);
+  }
 }
 
 // Guards against a double submit: Enter plus a click, or two fast presses, can
@@ -902,12 +1018,17 @@ async function submitMessage(event) {
     if (!id) return;
     welcome.classList.add("hidden");
     appendMessage("", text);
-    activeStream = { controller: new AbortController(), target: appendMessage("assistant-message") };
+    activeStream = {
+      controller: new AbortController(),
+      target: appendMessage("assistant-message"),
+      conversationId: id,
+      turnId: null,
+    };
     setStreaming(true);
     prompt.value = "";
     prompt.dispatchEvent(new Event("input"));
     try {
-      await streamReply({ conversationId: id, content: text }, activeStream);
+      await streamReply({ conversationId: id, content: text, clientTurnId: newClientTurnId() }, activeStream);
     } finally {
       activeStream = null;
       setStreaming(false);
@@ -926,7 +1047,7 @@ $("#composer-form").addEventListener("submit", submitMessage);
 sendButton.addEventListener("click", (event) => {
   if (!activeStream) return;
   event.preventDefault();
-  activeStream.controller.abort();
+  void cancelActiveTurn();
 });
 prompt.addEventListener("input", () => {
   prompt.style.height = "auto";
