@@ -151,3 +151,10 @@ html.dark .knowledge-action{color:#d0def87a;border-color:rgba(255,255,255,.1)}
 html.dark .knowledge-field{background:#0f1a2c;color:var(--ink);border-color:rgba(255,255,255,.1)}
 @media(max-width:900px){.knowledge-columns{grid-template-columns:1fr}.knowledge-stats{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:640px){.panel-view{top:56px;width:calc(100% - 25px)}}
+.fast-toggle.active{background:rgba(37,67,255,.12);border-color:rgba(37,67,255,.34);color:#1f37d6;font-weight:600}
+html.dark .fast-toggle.active{background:rgba(108,132,255,.2);border-color:rgba(108,132,255,.42);color:#cdd8ff}
+.live-hint{display:flex;align-items:center;gap:7px;margin:0 0 6px;padding:0 4px;color:var(--muted);font-size:11px;line-height:1.5}
+.live-hint[hidden]{display:none}
+.live-hint .live-dot{flex:none;width:6px;height:6px;border-radius:50%;background:#2543ff;animation:live-pulse 1.2s ease-in-out infinite}
+@keyframes live-pulse{0%,100%{opacity:.3}50%{opacity:1}}
+@media(prefers-reduced-motion:reduce){.live-hint .live-dot{animation:none;opacity:.8}}

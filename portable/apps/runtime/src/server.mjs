@@ -18,6 +18,7 @@ import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
 import { TERMINAL_TURN_STATUSES, createTurnManager } from "./ai/turns.mjs";
+import { describeEfforts, normalizeEffort, suggestEffort } from "./ai/effort.mjs";
 import { createRouter, json, readJsonBody } from "./router.mjs";
 
 const DEFAULT_PORT = 3141;
@@ -282,7 +283,13 @@ export async function startLocalRuntime(options = {}) {
   // and a real Trae provider will be swapped in here later without UI changes.
   router.get("/api/ai/models", async (ctx) => {
     if (!(await requireActor(ctx))) return true;
-    json(ctx.response, 200, { provider: aiProvider.id, models: await aiProvider.listModels() });
+    // The effort levels travel with the model list so the composer renders them
+    // from one source of truth instead of a second hard-coded copy.
+    json(ctx.response, 200, {
+      provider: aiProvider.id,
+      models: await aiProvider.listModels(),
+      efforts: describeEfforts(),
+    });
     return true;
   });
 
@@ -377,7 +384,16 @@ export async function startLocalRuntime(options = {}) {
       const existing = await turnStore.findByClientTurnId({ ownerId, conversationId, clientTurnId });
       if (existing) {
         const send = openEventStream(ctx);
-        send({ meta: { turnId: existing.id, conversationId, clientTurnId, status: existing.status } });
+        send({
+          meta: {
+            turnId: existing.id,
+            conversationId,
+            clientTurnId,
+            status: existing.status,
+            effort: existing.effort,
+            fast: existing.fast,
+          },
+        });
         if (TERMINAL_TURN_STATUSES.includes(existing.status)) {
           if (existing.text) send({ delta: existing.text });
           send({ done: true, status: existing.status, cancelled: existing.status === "cancelled" });
@@ -434,16 +450,38 @@ export async function startLocalRuntime(options = {}) {
       return true;
     }
 
-    const turn = await turnStore.begin({ ownerId, conversationId, projectId, clientTurnId });
+    // Thinking effort is chosen per turn. An explicit level wins; otherwise the
+    // runtime picks one for the question ("自动"), which the composer shows back
+    // to the user once the reply starts.
+    const requestedEffort = typeof body.effort === "string" && body.effort.trim() ? body.effort : null;
+    const effort = requestedEffort
+      ? normalizeEffort(requestedEffort)
+      : suggestEffort(question);
+    const fast = body.fast === true;
+    const model = await aiSettings.currentModel();
+
+    const turn = await turnStore.begin({
+      ownerId,
+      conversationId,
+      projectId,
+      clientTurnId,
+      effort,
+      fast,
+    });
     const send = openEventStream(ctx);
-    send({ meta: { turnId: turn.id, conversationId, clientTurnId, status: "running" } });
+    send({ meta: { turnId: turn.id, conversationId, clientTurnId, status: "running", model, effort, fast } });
 
     let answer = "";
     let outcome = "done";
     try {
+      // Stage events drive the composer's live hint; they are not part of the
+      // reply text, matching how the reference client treats them.
+      send({ stage: true, status: "正在读取项目上下文与知识" });
       for await (const chunk of aiProvider.streamChat({
-        model: await aiSettings.currentModel(),
+        model,
         messages,
+        effort,
+        fast,
         // The turn's own signal, not the request's: a client disconnect must not
         // stop the reply.
         signal: turnStore.signalFor(turn.id),
@@ -510,7 +548,7 @@ export async function startLocalRuntime(options = {}) {
       ctx.response.end();
       return true;
     }
-    send({ meta: { turnId: turn.id, conversationId, status: turn.status } });
+    send({ meta: { turnId: turn.id, conversationId, status: turn.status, effort: turn.effort, fast: turn.fast } });
     if (TERMINAL_TURN_STATUSES.includes(turn.status)) {
       send({ done: true, status: turn.status });
       ctx.response.end();

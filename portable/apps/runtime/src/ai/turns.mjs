@@ -78,6 +78,8 @@ export function createTurnManager(options = {}) {
       status: turn.status,
       text: turn.text ?? "",
       error: turn.error ?? null,
+      effort: turn.effort ?? null,
+      fast: turn.fast === true,
       seq: entry ? entry.seq : 0,
       createdAt: turn.createdAt ?? null,
       updatedAt: turn.updatedAt ?? null,
@@ -175,7 +177,14 @@ export function createTurnManager(options = {}) {
     return publicTurn(candidates.at(-1));
   }
 
-  async function begin({ ownerId, conversationId, projectId = null, clientTurnId = null }) {
+  async function begin({
+    ownerId,
+    conversationId,
+    projectId = null,
+    clientTurnId = null,
+    effort = null,
+    fast = false,
+  }) {
     // One reply at a time per conversation: sending again replaces the running
     // turn, mirroring the workbench where a new message stops the previous one.
     for (const entry of [...live.values()]) {
@@ -194,6 +203,8 @@ export function createTurnManager(options = {}) {
       status: "running",
       text: "",
       error: null,
+      effort: effort ?? null,
+      fast: fast === true,
       createdAt: timestamp,
       updatedAt: timestamp,
       finishedAt: null,

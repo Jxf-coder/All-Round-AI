@@ -65,6 +65,11 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(scriptSource, /submitMessage/);
     assert.match(scriptSource, /knowledgeAction/);
     assert.match(scriptSource, /openMemory/);
+    assert.match(scriptSource, /openEffortMenu/);
+    assert.match(scriptSource, /stopLiveHint/);
+    assert.match(pageHtml, /id="effort-button"/);
+    assert.match(pageHtml, /id="fast-toggle"/);
+    assert.match(pageHtml, /id="live-hint"/);
 
     const loginPage = await fetch(`${runtime.url}/login`);
     assert.equal(loginPage.status, 200);

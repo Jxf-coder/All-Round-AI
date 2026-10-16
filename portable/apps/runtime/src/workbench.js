@@ -204,14 +204,17 @@ async function regenerateLastReply() {
     turnId: null,
   };
   setStreaming(true);
+  resolvedEffort = null;
+  startLiveHint();
   try {
     await streamReply(
-      { conversationId: activeConversationId, retry: true, clientTurnId: newClientTurnId() },
+      { conversationId: activeConversationId, retry: true, clientTurnId: newClientTurnId(), ...turnOptions() },
       activeStream,
     );
   } finally {
     activeStream = null;
     setStreaming(false);
+    stopLiveHint();
   }
   await openConversation(activeConversationId);
 }
@@ -238,37 +241,70 @@ function appendMessage(className, text = "") {
 }
 
 // ---------------------------------------------------------------------------
-// Model picker. The active model is an installation setting read from the
-// settings API; changing it is an admin action, so a refusal is surfaced to the
-// user instead of being silently swallowed.
+// Composer pickers. The model list is an installation setting read from the
+// settings API (changing it is an admin action), while thinking effort and Fast
+// mode are per-turn choices remembered for this browser. Both pickers share one
+// menu element, so opening either replaces the other.
 // ---------------------------------------------------------------------------
 const modelButton = $("#model-button");
 const modelLabel = $("#model-label");
+const effortButton = $("#effort-button");
+const effortLabel = $("#effort-label");
+const fastToggle = $("#fast-toggle");
 const modelMenu = $("#model-menu");
 let aiSettings = null;
+let efforts = [];
+let menuMode = "model";
+// "auto" leaves the level to the runtime, which reports the level it picked in
+// the reply's meta event; an explicit level always wins.
+let effortChoice = storage.get("effort") || "auto";
+let fastMode = storage.get("fast") === "1";
+let resolvedEffort = null;
+
+function effortZh(id) {
+  return efforts.find((item) => item.id === id)?.zh ?? id;
+}
+
+function effortDisplay() {
+  if (effortChoice !== "auto") return effortZh(effortChoice);
+  return resolvedEffort ? `自动（${effortZh(resolvedEffort)}）` : "自动";
+}
+
+function modelName() {
+  return aiSettings?.models.find((model) => model.id === aiSettings.model)?.name ?? "选择模型";
+}
 
 function renderModel() {
-  const active = aiSettings?.models.find((model) => model.id === aiSettings.model);
-  modelLabel.textContent = active?.name ?? "选择模型";
+  modelLabel.textContent = [modelName(), effortDisplay(), fastMode ? "Fast" : null].filter(Boolean).join(" · ");
   modelButton.title = aiSettings
-    ? `当前模型：${active?.name ?? aiSettings.model}（${aiSettings.providerLabel}）`
+    ? `当前模型：${modelName()}（${aiSettings.providerLabel}）`
     : "选择模型";
+  effortLabel.textContent = effortDisplay();
+  effortButton.title = `思考强度：${effortDisplay()}${fastMode ? " · Fast" : ""}`;
+  fastToggle.classList.toggle("active", fastMode);
+  fastToggle.setAttribute("aria-pressed", String(fastMode));
 }
 
 function closeModelMenu() {
   modelMenu.hidden = true;
   modelButton.setAttribute("aria-expanded", "false");
+  effortButton.setAttribute("aria-expanded", "false");
 }
 
 async function loadAiSettings() {
-  let response;
+  let settingsResponse;
+  let modelsResponse;
   try {
-    response = await apiRequest("/api/settings/ai");
+    // Effort levels ship with the model list so they are defined in one place.
+    [settingsResponse, modelsResponse] = await Promise.all([
+      apiRequest("/api/settings/ai"),
+      apiRequest("/api/ai/models"),
+    ]);
   } catch {
     return;
   }
-  if (!response?.ok) return;
-  aiSettings = await response.json();
+  if (settingsResponse?.ok) aiSettings = await settingsResponse.json();
+  if (modelsResponse?.ok) efforts = (await modelsResponse.json()).efforts ?? [];
   renderModel();
 }
 
@@ -289,7 +325,39 @@ async function selectModel(id) {
   closeModelMenu();
 }
 
+function selectEffort(id) {
+  effortChoice = id;
+  resolvedEffort = null;
+  storage.set("effort", id);
+  renderModel();
+  closeModelMenu();
+}
+
+function toggleFast() {
+  fastMode = !fastMode;
+  storage.set("fast", fastMode ? "1" : "0");
+  renderModel();
+}
+
+// Sent with every turn: an omitted effort means "let the runtime decide".
+function turnOptions() {
+  return { ...(effortChoice === "auto" ? {} : { effort: effortChoice }), fast: fastMode };
+}
+
+function menuOption(label, note, isActive, onSelect) {
+  const option = document.createElement("button");
+  option.type = "button";
+  option.className = "model-option";
+  option.setAttribute("role", "option");
+  option.setAttribute("aria-selected", String(isActive));
+  option.classList.toggle("active", isActive);
+  option.textContent = note ? `${label} · ${note}` : label;
+  option.addEventListener("click", onSelect);
+  return option;
+}
+
 function openModelMenu() {
+  menuMode = "model";
   modelMenu.replaceChildren();
   if (!aiSettings) {
     const note = document.createElement("div");
@@ -298,16 +366,7 @@ function openModelMenu() {
     modelMenu.append(note);
   } else {
     for (const model of aiSettings.models) {
-      const option = document.createElement("button");
-      option.type = "button";
-      option.className = "model-option";
-      option.setAttribute("role", "option");
-      const isActive = model.id === aiSettings.model;
-      option.setAttribute("aria-selected", String(isActive));
-      option.classList.toggle("active", isActive);
-      option.textContent = model.name;
-      option.addEventListener("click", () => void selectModel(model.id));
-      modelMenu.append(option);
+      modelMenu.append(menuOption(model.name, "", model.id === aiSettings.model, () => void selectModel(model.id)));
     }
     const note = document.createElement("div");
     note.className = "model-note";
@@ -318,6 +377,70 @@ function openModelMenu() {
   }
   modelMenu.hidden = false;
   modelButton.setAttribute("aria-expanded", "true");
+}
+
+function openEffortMenu() {
+  menuMode = "effort";
+  modelMenu.replaceChildren();
+  modelMenu.append(menuOption("自动", "按问题选择", effortChoice === "auto", () => selectEffort("auto")));
+  for (const effort of efforts) {
+    modelMenu.append(menuOption(effort.zh, effort.hint, effort.id === effortChoice, () => selectEffort(effort.id)));
+  }
+  modelMenu.hidden = false;
+  effortButton.setAttribute("aria-expanded", "true");
+}
+
+// ---------------------------------------------------------------------------
+// Live hint. While a reply is being produced the composer shows what the
+// runtime is doing plus how long the user has waited, with a rotating companion
+// line once the wait stops feeling instant.
+// ---------------------------------------------------------------------------
+const liveHint = $("#live-hint");
+const liveHintText = $("#live-hint-text");
+const WAIT_HINTS = ["正在思考…", "正在组织语言…", "正在把要点排好…", "内容不少，再等一小会儿…"];
+const LONG_WAIT_HINTS = ["还在生成，可以继续等或点停止…", "这次生成时间较长，不需要可以停止。"];
+let liveHintTimer = null;
+let liveHintBase = "正在准备…";
+let liveHintStartedAt = 0;
+
+function renderLiveHint() {
+  const seconds = Math.round((Date.now() - liveHintStartedAt) / 1000);
+  liveHintText.textContent = `${liveHintBase}（${seconds}s）`;
+}
+
+function startLiveHint(base = "正在准备…") {
+  if (liveHintTimer) clearInterval(liveHintTimer);
+  liveHintBase = base;
+  liveHintStartedAt = Date.now();
+  liveHint.hidden = false;
+  renderLiveHint();
+  liveHintTimer = setInterval(() => {
+    const seconds = Math.round((Date.now() - liveHintStartedAt) / 1000);
+    if (seconds >= 20) liveHintBase = LONG_WAIT_HINTS[Math.floor(seconds / 8) % LONG_WAIT_HINTS.length];
+    else if (seconds >= 7) liveHintBase = WAIT_HINTS[Math.floor(seconds / 6) % WAIT_HINTS.length];
+    renderLiveHint();
+  }, 1000);
+}
+
+function setLiveStage(text) {
+  if (typeof text !== "string" || !text) return;
+  liveHintBase = text;
+  renderLiveHint();
+}
+
+function stopLiveHint() {
+  if (liveHintTimer) clearInterval(liveHintTimer);
+  liveHintTimer = null;
+  liveHint.hidden = true;
+  liveHintText.textContent = "";
+}
+
+// The runtime reports the level it actually used, so "自动" can show what it
+// resolved to instead of staying opaque.
+function applyTurnMeta(meta) {
+  if (!meta) return;
+  if (meta.effort) resolvedEffort = meta.effort;
+  renderModel();
 }
 
 // ---------------------------------------------------------------------------
@@ -913,6 +1036,8 @@ async function streamReply(payload, stream) {
       let chunk;
       try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
       if (chunk.meta?.turnId) stream.turnId = chunk.meta.turnId;
+      if (chunk.meta) applyTurnMeta(chunk.meta);
+      if (chunk.stage) setLiveStage(chunk.status);
       if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
       if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
       if (chunk.done) {
@@ -965,6 +1090,7 @@ async function followLiveTurn(conversationId, after, stream) {
       if (!line) continue;
       let chunk;
       try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
+      if (chunk.meta) applyTurnMeta(chunk.meta);
       if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
       if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
       if (chunk.done) {
@@ -993,11 +1119,15 @@ async function reattachLiveTurn(conversationId) {
   const target = appendMessage("assistant-message", turn.text || "");
   activeStream = { controller: new AbortController(), target, conversationId, turnId: turn.id };
   setStreaming(true);
+  if (turn.effort) resolvedEffort = turn.effort;
+  renderModel();
+  startLiveHint("正在继续生成…");
   try {
     await followLiveTurn(conversationId, turn.seq || 0, activeStream);
   } finally {
     activeStream = null;
     setStreaming(false);
+    stopLiveHint();
     // Re-render from storage so the finished answer replaces the streaming bubble.
     await openConversation(conversationId);
   }
@@ -1025,13 +1155,19 @@ async function submitMessage(event) {
       turnId: null,
     };
     setStreaming(true);
+    resolvedEffort = null;
+    startLiveHint();
     prompt.value = "";
     prompt.dispatchEvent(new Event("input"));
     try {
-      await streamReply({ conversationId: id, content: text, clientTurnId: newClientTurnId() }, activeStream);
+      await streamReply(
+        { conversationId: id, content: text, clientTurnId: newClientTurnId(), ...turnOptions() },
+        activeStream,
+      );
     } finally {
       activeStream = null;
       setStreaming(false);
+      stopLiveHint();
     }
     // Re-render from storage so a cancelled or failed turn still shows exactly
     // what the server kept.
@@ -1058,16 +1194,22 @@ prompt.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); submitMessage(event); }
 });
 modelButton.addEventListener("click", () => {
-  if (modelMenu.hidden) openModelMenu();
-  else closeModelMenu();
+  if (!modelMenu.hidden && menuMode === "model") closeModelMenu();
+  else openModelMenu();
 });
+effortButton.addEventListener("click", () => {
+  if (!modelMenu.hidden && menuMode === "effort") closeModelMenu();
+  else openEffortMenu();
+});
+fastToggle.addEventListener("click", () => toggleFast());
 projectButton.addEventListener("click", () => {
   if (projectMenu.hidden) openProjectMenu();
   else closeProjectMenu();
 });
 document.addEventListener("click", (event) => {
   if (modelMenu.hidden) return;
-  if (isInside(event, modelMenu) || isInside(event, modelButton)) return;
+  if (isInside(event, modelMenu) || isInside(event, modelButton)
+    || isInside(event, effortButton) || isInside(event, fastToggle)) return;
   closeModelMenu();
 });
 document.addEventListener("click", (event) => {
