@@ -718,6 +718,9 @@ const memoryEditor = $("#memory-editor");
 const memoryHint = $("#memory-hint");
 const memoryStatus = $("#memory-status");
 const memorySave = $("#memory-save");
+const memoryPendingList = $("#memory-pending");
+const memorySoulButton = $("#memory-generate-soul");
+const memoryDistillButton = $("#memory-distill");
 const MEMORY_HINTS = {
   soul: "人格：说明这个 Agent 是谁、为谁服务，以及职责、风格与禁忌。",
   memory: "长期记忆：跨会话有效的事实、决策与偏好写在这里。",
@@ -728,6 +731,44 @@ const MEMORY_PLACEHOLDERS = {
 };
 let memoryTab = "soul";
 let memoryDraft = { soul: "", memory: "" };
+let memoryPending = [];
+let memoryWorking = false;
+
+function applyMemoryState(payload) {
+  memoryDraft = {
+    soul: payload?.soul ?? memoryDraft.soul,
+    memory: payload?.memory ?? memoryDraft.memory,
+  };
+  memoryPending = Array.isArray(payload?.pending) ? payload.pending : memoryPending;
+}
+
+function renderMemoryPending() {
+  const visible = memoryTab === "memory";
+  memoryPendingList.hidden = !visible;
+  memoryPendingList.replaceChildren();
+  if (!visible) return;
+  if (memoryPending.length === 0) {
+    memoryPendingList.append(element("p", "memory-pending-empty", "暂无待确认条目。对话提炼后会出现在这里。"));
+    return;
+  }
+  for (const item of memoryPending) {
+    const row = element("div", "memory-pending-item");
+    row.append(element("p", "memory-pending-kind", `[${item.kind}]`));
+    row.append(element("p", "memory-pending-text", item.text));
+    const actions = element("div", "memory-pending-actions");
+    const confirm = element("button", "confirm", "采纳");
+    confirm.type = "button";
+    confirm.disabled = memoryWorking;
+    confirm.addEventListener("click", () => void actOnPending("confirm", item));
+    const discard = element("button", "discard", "丢弃");
+    discard.type = "button";
+    discard.disabled = memoryWorking;
+    discard.addEventListener("click", () => void actOnPending("discard", item));
+    actions.append(confirm, discard);
+    row.append(actions);
+    memoryPendingList.append(row);
+  }
+}
 
 function renderMemory() {
   memoryEditor.value = memoryDraft[memoryTab] ?? "";
@@ -738,6 +779,11 @@ function renderMemory() {
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
   }
+  memorySoulButton.hidden = memoryTab !== "soul";
+  memoryDistillButton.hidden = memoryTab !== "memory";
+  memorySoulButton.disabled = memoryWorking;
+  memoryDistillButton.disabled = memoryWorking || !activeConversationId;
+  renderMemoryPending();
 }
 
 async function openMemory() {
@@ -745,6 +791,7 @@ async function openMemory() {
   memoryTitle.textContent = `人格与记忆 · ${projectNameOf(currentProjectId)}`;
   memoryTab = "soul";
   memoryDraft = { soul: "", memory: "" };
+  memoryPending = [];
   memoryStatus.textContent = "加载中…";
   renderMemory();
   const response = await apiRequest(`/api/memory?projectId=${encodeURIComponent(currentProjectId ?? "")}`);
@@ -753,7 +800,7 @@ async function openMemory() {
     return;
   }
   const payload = await response.json();
-  memoryDraft = { soul: payload.soul ?? "", memory: payload.memory ?? "" };
+  applyMemoryState(payload);
   memoryStatus.textContent = payload.updatedAt
     ? `上次保存：${new Date(payload.updatedAt).toLocaleString()}`
     : "";
@@ -767,20 +814,101 @@ function closeMemory() {
 async function saveMemory() {
   memorySave.disabled = true;
   memorySave.textContent = "保存中…";
-  const response = await apiRequest("/api/memory", {
-    method: "POST",
-    body: JSON.stringify({ projectId: currentProjectId, soul: memoryDraft.soul, memory: memoryDraft.memory }),
-  });
-  memorySave.disabled = false;
-  memorySave.textContent = "保存";
-  const payload = await response?.json().catch(() => ({}));
-  if (!response?.ok) {
-    memoryStatus.textContent = payload?.error || "保存失败";
+  try {
+    const response = await apiRequest("/api/memory", {
+      method: "POST",
+      body: JSON.stringify({ projectId: currentProjectId, soul: memoryDraft.soul, memory: memoryDraft.memory }),
+    });
+    const payload = await response?.json().catch(() => ({}));
+    if (!response?.ok) {
+      memoryStatus.textContent = payload?.error || "保存失败";
+      return;
+    }
+    applyMemoryState(payload);
+    memoryStatus.textContent = `已保存 ${new Date(payload.updatedAt).toLocaleString()}`;
+    renderMemory();
+  } finally {
+    memorySave.disabled = false;
+    memorySave.textContent = "保存";
+  }
+}
+
+// Candidates distilled from a conversation are accepted or dropped one by one;
+// nothing reaches MEMORY.md before 采纳.
+async function actOnPending(action, item) {
+  if (memoryWorking) return;
+  memoryWorking = true;
+  memoryStatus.textContent = action === "confirm" ? "正在采纳…" : "正在丢弃…";
+  renderMemory();
+  try {
+    const response = await apiRequest("/api/memory/pending", {
+      method: "POST",
+      body: JSON.stringify({ projectId: currentProjectId, action, id: item.id }),
+    });
+    const payload = await response?.json().catch(() => ({}));
+    if (!response?.ok) {
+      memoryStatus.textContent = payload?.error || "操作失败";
+      return;
+    }
+    applyMemoryState(payload);
+    memoryStatus.textContent = action === "confirm" ? "已采纳到长期记忆" : "已丢弃";
+  } finally {
+    memoryWorking = false;
+    renderMemory();
+  }
+}
+
+async function generateSoulDraft() {
+  if (memoryWorking) return;
+  memoryWorking = true;
+  memoryStatus.textContent = "正在生成人格初稿…";
+  renderMemory();
+  try {
+    const response = await apiRequest("/api/memory/soul-draft", {
+      method: "POST",
+      body: JSON.stringify({ projectId: currentProjectId }),
+    });
+    const payload = await response?.json().catch(() => ({}));
+    if (!response?.ok) {
+      memoryStatus.textContent = payload?.error || "生成失败";
+      return;
+    }
+    memoryDraft.soul = payload.draft ?? memoryDraft.soul;
+    memoryTab = "soul";
+    memoryStatus.textContent = "初稿已放入编辑框，保存后才会生效";
+  } finally {
+    memoryWorking = false;
+    renderMemory();
+  }
+}
+
+async function distillCurrentConversation() {
+  if (memoryWorking) return;
+  if (!activeConversationId) {
+    memoryStatus.textContent = "先打开一个对话再提炼";
     return;
   }
-  memoryDraft = { soul: payload.soul ?? "", memory: payload.memory ?? "" };
-  memoryStatus.textContent = `已保存 ${new Date(payload.updatedAt).toLocaleString()}`;
+  memoryWorking = true;
+  memoryStatus.textContent = "正在提炼当前会话…";
   renderMemory();
+  try {
+    const response = await apiRequest("/api/memory/distill", {
+      method: "POST",
+      body: JSON.stringify({ projectId: currentProjectId, conversationId: activeConversationId }),
+    });
+    const payload = await response?.json().catch(() => ({}));
+    if (!response?.ok) {
+      memoryStatus.textContent = payload?.error || "提炼失败";
+      return;
+    }
+    applyMemoryState(payload);
+    memoryStatus.textContent = payload.added > 0
+      ? `已加入 ${payload.added} 条待确认`
+      : "没有新的可提炼条目";
+  } finally {
+    memoryWorking = false;
+    renderMemory();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,6 +1477,8 @@ $("#memory-toggle").addEventListener("click", () => void openMemory());
 $("#memory-close").addEventListener("click", closeMemory);
 memoryModal.addEventListener("click", (event) => { if (event.target === memoryModal) closeMemory(); });
 memorySave.addEventListener("click", () => void saveMemory());
+memorySoulButton.addEventListener("click", () => void generateSoulDraft());
+memoryDistillButton.addEventListener("click", () => void distillCurrentConversation());
 // Edits stay in the draft until 保存, and switching tabs keeps them.
 memoryEditor.addEventListener("input", () => { memoryDraft[memoryTab] = memoryEditor.value; });
 document.querySelectorAll(".memory-tab").forEach((tab) => tab.addEventListener("click", () => {

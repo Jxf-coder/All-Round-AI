@@ -51,6 +51,10 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(pageHtml, /src="workbench\.js"/);
     assert.match(pageHtml, /id="panel-view"/);
     assert.match(pageHtml, /aria-label="人格与记忆"/);
+    // Memory candidates are reviewed before they reach MEMORY.md.
+    assert.match(pageHtml, /id="memory-pending"/);
+    assert.match(pageHtml, /id="memory-generate-soul"/);
+    assert.match(pageHtml, /id="memory-distill"/);
     assert.equal(new URL("workbench.css", `${runtime.url}/`).pathname, "/workbench.css");
 
     const style = await fetch(`${runtime.url}/workbench.css`);
@@ -58,6 +62,7 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(style.headers.get("content-type"), /text\/css/);
     const styleSource = await style.text();
     assert.match(styleSource, /\.topbar/);
+    assert.match(styleSource, /\.memory-pending\{[^}]*overflow-y:auto/);
     // The rail keeps the reference layout: one scrolling body plus a fixed
     // footer, so a short viewport cannot let the footer cover history entries.
     assert.match(styleSource, /\.rail-heading\{[^}]*flex:0 0 52px/);

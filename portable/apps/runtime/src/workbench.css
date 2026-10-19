@@ -104,6 +104,23 @@ html.dark .memory-tab.active{color:var(--ink);border-bottom-color:#6c84ff}
 html.dark .memory-tabs,html.dark .memory-footer{border-color:var(--hairline)}
 html.dark .memory-editor{background:#0f1a2c;color:var(--ink);border-color:rgba(255,255,255,.1)}
 html.dark .memory-status{color:#d0def87a}
+.memory-action-row{display:flex;align-items:center;gap:8px}
+.memory-action-row .memory-hint{flex:1;min-width:0}
+.memory-ai-button{flex:none;padding:4px 9px;border:1px solid var(--hairline);border-radius:7px;background:transparent;color:var(--ink);font-family:inherit;font-size:10px;cursor:pointer}
+.memory-ai-button:hover{background:var(--chip)}
+.memory-ai-button[hidden]{display:none}
+.memory-ai-button:disabled{opacity:.45;cursor:default}
+.memory-pending{display:flex;flex-direction:column;gap:6px;max-height:150px;overflow-y:auto}
+.memory-pending[hidden]{display:none}
+.memory-pending-empty{margin:0;color:#9aa5b3;font-size:10px}
+.memory-pending-item{padding:7px 9px;border:1px solid var(--hairline);border-radius:8px;background:#fbfcfe}
+.memory-pending-kind{margin:0 0 3px;color:#8290a1;font-size:9px}
+.memory-pending-text{margin:0 0 5px;color:var(--ink);font-size:11px;line-height:1.6}
+.memory-pending-actions{display:flex;gap:6px}
+.memory-pending-actions button{padding:2px 7px;border:1px solid var(--hairline);border-radius:6px;background:transparent;color:var(--ink);font-family:inherit;font-size:10px;cursor:pointer}
+.memory-pending-actions .confirm{border-color:#b9c4ff;color:#2543ff}
+.memory-pending-actions .discard{color:#b4483f}
+html.dark .memory-pending-item{background:#0f1a2c}
 
 /* Rail panels: the main area shows either the chat or a section view. */
 .panel-view{position:absolute;top:72px;bottom:24px;left:50%;transform:translateX(-50%);width:min(760px,calc(100% - 60px));overflow:auto;display:flex;flex-direction:column;gap:12px;padding-bottom:8px}

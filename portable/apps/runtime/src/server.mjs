@@ -21,6 +21,13 @@ import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
 import { TERMINAL_TURN_STATUSES, createTurnManager } from "./ai/turns.mjs";
 import { describeEfforts, normalizeEffort, suggestEffort } from "./ai/effort.mjs";
+import {
+  buildDistillPrompt,
+  buildSoulPrompt,
+  cleanSoulDraft,
+  formatCardsForSoul,
+  parseDistillReply,
+} from "./ai/memory-generate.mjs";
 import { createProviderRegistry } from "./ai/registry.mjs";
 import { createRouter, json, readJsonBody } from "./router.mjs";
 import { displayHost, resolveRuntimeConfiguration } from "./runtime-profile.mjs";
@@ -752,6 +759,164 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, 200, await memoryStore.save(projectId, { soul: body.soul, memory: body.memory }));
     } catch (error) {
       json(ctx.response, 400, { error: error.message || "记忆保存失败" });
+    }
+    return true;
+  });
+
+  // Distilled memory waits in a confirmation queue: `add` appends candidates,
+  // `confirm` moves one into MEMORY.md, `discard` drops it. Only confirmed
+  // entries are injected into a chat turn.
+  router.post("/api/memory/pending", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const defaultProjectId = await projectStore.defaultRootId();
+    const projectId = typeof body.projectId === "string" && body.projectId ? body.projectId : defaultProjectId;
+    if (!(await projectStore.get(projectId))) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    let result;
+    try {
+      if (body.action === "add") {
+        result = await memoryStore.addPending(projectId, body.items);
+      } else if (body.action === "confirm") {
+        result = await memoryStore.confirmPending(projectId, body.id, {
+          kind: body.kind,
+          text: body.text,
+        });
+      } else if (body.action === "discard") {
+        result = await memoryStore.discardPending(projectId, body.id);
+      } else {
+        json(ctx.response, 400, { error: "未知 action" });
+        return true;
+      }
+    } catch (error) {
+      json(ctx.response, 400, { error: error.message || "记忆条目处理失败" });
+      return true;
+    }
+    if (!result) {
+      json(ctx.response, 404, { error: "记忆条目不存在" });
+      return true;
+    }
+    json(ctx.response, 200, result);
+    return true;
+  });
+
+  // Distilling a conversation proposes candidate memories; it never confirms
+  // them. The provider is asked once and its reply must parse into entries,
+  // otherwise nothing is queued and the client gets a clear error.
+  router.post("/api/memory/distill", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx, { maxBytes: 32 * 1024 });
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const conversationId = typeof body.conversationId === "string" ? body.conversationId : "";
+    if (!conversationId) {
+      json(ctx.response, 400, { error: "缺少 conversationId" });
+      return true;
+    }
+    const conversation = await conversationStore.get(String(actor.id), conversationId);
+    if (!conversation) {
+      json(ctx.response, 404, { error: "对话不存在" });
+      return true;
+    }
+    const projectId = conversation.projectId ?? await projectStore.defaultRootId();
+    const { provider, model } = await resolveEngineModel(body.engine);
+    let reply;
+    try {
+      reply = await provider.chat({
+        model,
+        messages: [{ role: "user", content: buildDistillPrompt(conversation.messages) }],
+        effort: "low",
+        fast: true,
+        signal: ctx.signal,
+      });
+    } catch {
+      json(ctx.response, 502, { error: "AI 服务暂时不可用" });
+      return true;
+    }
+    const items = parseDistillReply(reply?.content ?? "");
+    if (items.length === 0) {
+      json(ctx.response, 422, { error: "模型没有返回可用的记忆条目" });
+      return true;
+    }
+    try {
+      const before = await memoryStore.get(projectId);
+      const state = await memoryStore.addPending(projectId, items);
+      json(ctx.response, 200, {
+        queued: true,
+        added: Math.max(0, state.pending.length - before.pending.length),
+        conversationId,
+        projectId,
+        ...state,
+      });
+    } catch (error) {
+      json(ctx.response, 400, { error: error.message || "记忆提炼失败" });
+    }
+    return true;
+  });
+
+  // SOUL generation returns a draft only. Saving stays an explicit action so a
+  // model cannot overwrite a person's persona on its own.
+  router.post("/api/memory/soul-draft", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const defaultProjectId = await projectStore.defaultRootId();
+    const projectId = typeof body.projectId === "string" && body.projectId ? body.projectId : defaultProjectId;
+    const project = await projectStore.get(projectId);
+    if (!project) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    const memory = await memoryStore.get(projectId);
+    const knowledge = await knowledgeStore.list(projectId);
+    const confirmed = knowledge.cards.filter((card) => card.status === "confirmed");
+    const { provider, model } = await resolveEngineModel(body.engine);
+    let reply;
+    try {
+      reply = await provider.chat({
+        model,
+        messages: [{
+          role: "user",
+          content: buildSoulPrompt({
+            projectName: project.name,
+            existingSoul: memory.soul,
+            memory: memory.memory,
+            cards: formatCardsForSoul(confirmed),
+          }),
+        }],
+        effort: "low",
+        fast: true,
+        signal: ctx.signal,
+      });
+    } catch {
+      json(ctx.response, 502, { error: "AI 服务暂时不可用" });
+      return true;
+    }
+    try {
+      json(ctx.response, 200, {
+        draft: cleanSoulDraft(reply?.content ?? ""),
+        existing: memory.soul,
+      });
+    } catch (error) {
+      json(ctx.response, 422, { error: error.message || "人格初稿生成失败" });
     }
     return true;
   });

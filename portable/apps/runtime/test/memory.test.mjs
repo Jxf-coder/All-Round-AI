@@ -22,6 +22,7 @@ test("memory is empty until it is saved, and reading never creates a record", as
       projectId: "project-1",
       soul: "",
       memory: "",
+      pending: [],
       updatedAt: null,
     });
     await assert.rejects(store.get(""), TypeError);
