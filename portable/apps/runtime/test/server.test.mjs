@@ -56,7 +56,13 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     const style = await fetch(`${runtime.url}/workbench.css`);
     assert.equal(style.status, 200);
     assert.match(style.headers.get("content-type"), /text\/css/);
-    assert.match(await style.text(), /\.topbar/);
+    const styleSource = await style.text();
+    assert.match(styleSource, /\.topbar/);
+    // The rail keeps the reference layout: one scrolling body plus a fixed
+    // footer, so a short viewport cannot let the footer cover history entries.
+    assert.match(styleSource, /\.rail-heading\{[^}]*flex:0 0 52px/);
+    assert.match(styleSource, /\.rail-scroll\{[^}]*overflow-y:auto/);
+    assert.match(styleSource, /\.rail-footer\{[^}]*flex:0 0 auto/);
 
     const script = await fetch(`${runtime.url}/workbench.js`);
     assert.equal(script.status, 200);
@@ -71,6 +77,8 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(scriptSource, /stopLiveHint/);
     assert.match(pageHtml, /id="engine-button"/);
     assert.match(pageHtml, /id="page-context-hint"/);
+    // History lives inside the scrolling rail body; the footer sits outside it.
+    assert.match(pageHtml, /class="rail-scroll"[\s\S]*id="history-list"[\s\S]*<\/div>\s*<div class="rail-footer"/);
     assert.match(pageHtml, /id="effort-button"/);
     assert.match(pageHtml, /id="fast-toggle"/);
     assert.match(pageHtml, /id="live-hint"/);

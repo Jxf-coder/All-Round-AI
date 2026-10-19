@@ -16,12 +16,14 @@
   <div class="app-frame">
     <aside class="rail" id="rail" aria-label="工作台导航">
       <div class="rail-heading"><button id="rail-toggle" class="icon-button" title="收起侧栏" aria-label="收起侧栏">‹</button><span class="rail-heading-label">WORKSPACE</span></div>
+      <div class="rail-scroll">
       <button class="new-agent" id="new-agent"><span class="agent-mark">A</span><span>新建 Agent 对话</span><span class="plus">＋</span></button>
       <nav class="rail-nav" aria-label="工作区">
         <button class="rail-item" data-panel="mcp"><span class="rail-glyph">⌘</span><span class="rail-label">MCP 连接器</span></button><div class="rail-section">Workspace</div>
         <button class="rail-item active" data-panel="agent"><span class="rail-glyph">⌘</span><span class="rail-label">Agent</span></button><button class="rail-item" data-panel="skills"><span class="rail-glyph">‹/›</span><span class="rail-label">Skill</span></button><button class="rail-item" data-panel="automation"><span class="rail-glyph">✳</span><span class="rail-label">自动化/AI员工</span></button><button class="rail-item" data-panel="database"><span class="rail-glyph">▤</span><span class="rail-label">知识库</span></button>
       </nav>
       <div class="rail-section recent-heading">最近对话 <button id="history-more" class="quiet-button">更多</button></div><div class="history-list" id="history-list"><div class="empty-history">新对话会显示在这里</div></div>
+      </div>
       <div class="rail-footer"><button class="account-button"><span class="avatar">J</span><span class="account-copy"><b>本地工作区</b><small>个人空间</small></span><span class="settings">⚙</span></button></div>
     </aside>
     <main class="workbench" id="workbench">
