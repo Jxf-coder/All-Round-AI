@@ -1118,6 +1118,9 @@ function ensureAgentView() {
 async function streamReply(payload, stream) {
   let response;
   try {
+    // Chromium flags a fully-consumed streaming fetch as net::ERR_ABORTED in
+    // DevTools even when the body arrived complete; a standalone SSE probe
+    // reproduces it, so the signal is kept only as a cancel fallback.
     response = await fetch("/api/ai/chat/stream", {
       method: "POST",
       headers: { "content-type": "application/json" },
