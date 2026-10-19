@@ -972,6 +972,20 @@ export async function startLocalRuntime(options = {}) {
         case "gapReopen":
           missing = await knowledgeStore.setGapStatus(projectId, body.id, "open", body.note) ? null : "缺口不存在";
           break;
+        case "regressionAdd":
+          await knowledgeStore.addRegressionQuestion(projectId, body.question);
+          break;
+        case "regressionRemove":
+          missing = await knowledgeStore.removeRegressionQuestion(projectId, body.id) ? null : "回归题不存在";
+          break;
+        case "regressionRun": {
+          const run = await knowledgeStore.runRegression(projectId, body.reason);
+          if (!run) {
+            json(ctx.response, 400, { error: "还没有回归题" });
+            return true;
+          }
+          break;
+        }
         default:
           json(ctx.response, 400, { error: "未知的 action" });
           return true;

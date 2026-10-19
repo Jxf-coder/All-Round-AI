@@ -18,14 +18,58 @@ export const MAX_CARD_TITLE = 120;
 export const MAX_CARD_BODY = 4_000;
 export const MAX_GAP_TEXT = 500;
 export const DEFAULT_RETRIEVAL_LIMIT = 3;
+export const MAX_REGRESSION_QUESTIONS = 60;
+export const MAX_REGRESSION_RUNS = 20;
+export const REGRESSION_HITS = 5;
 
 const KIND_SET = new Set(CARD_KINDS);
 const STATUS_SET = new Set(CARD_STATUSES);
 const MAX_CARDS = 500;
 const MAX_GAPS = 200;
+const MAX_REGRESSION_QUESTION = 200;
 
 function isIsoTimestamp(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function validateRegression(regression) {
+  // Regression questions arrived after cards and gaps; documents written before
+  // that simply have no `regression` key and stay readable.
+  if (regression === undefined) return;
+  if (!regression || typeof regression !== "object"
+    || !Array.isArray(regression.questions) || !Array.isArray(regression.runs)) {
+    throw new Error("All Round AI knowledge store contains an invalid regression record");
+  }
+  for (const question of regression.questions) {
+    if (!question || typeof question !== "object"
+      || typeof question.id !== "string" || !question.id
+      || typeof question.q !== "string" || !question.q
+      || question.from !== "manual"
+      || !isIsoTimestamp(question.addedAt)
+      || (question.baseline !== undefined
+        && (!Array.isArray(question.baseline)
+          || !question.baseline.every((id) => typeof id === "string")))) {
+      throw new Error("All Round AI knowledge store contains an invalid regression question");
+    }
+  }
+  for (const run of regression.runs) {
+    if (!run || typeof run !== "object"
+      || typeof run.id !== "string" || !run.id
+      || !isIsoTimestamp(run.at)
+      || typeof run.reason !== "string"
+      || !Number.isSafeInteger(run.total) || !Number.isSafeInteger(run.passed)
+      || (run.retained !== null && typeof run.retained !== "number")
+      || !Array.isArray(run.items)
+      || !run.items.every((item) => item && typeof item === "object"
+        && typeof item.id === "string"
+        && typeof item.q === "string"
+        && Array.isArray(item.hits)
+        && item.hits.every((id) => typeof id === "string")
+        && typeof item.pass === "boolean"
+        && (item.retained === null || typeof item.retained === "number"))) {
+      throw new Error("All Round AI knowledge store contains an invalid regression run");
+    }
+  }
 }
 
 function validateDocument(value) {
@@ -61,6 +105,7 @@ function validateDocument(value) {
         throw new Error("All Round AI knowledge store contains an invalid gap");
       }
     }
+    validateRegression(project.regression);
   }
   return value;
 }
@@ -101,6 +146,32 @@ function cloneGap(gap) {
     status: gap.status,
     createdAt: gap.createdAt,
     closedAt: gap.closedAt ?? null,
+  };
+}
+
+function emptyRegression() {
+  return { questions: [], runs: [] };
+}
+
+function cloneRegressionQuestion(question) {
+  return {
+    id: question.id,
+    q: question.q,
+    from: question.from,
+    addedAt: question.addedAt,
+    baseline: question.baseline ? [...question.baseline] : null,
+  };
+}
+
+function cloneRegressionRun(run) {
+  return {
+    id: run.id,
+    at: run.at,
+    reason: run.reason,
+    total: run.total,
+    passed: run.passed,
+    retained: run.retained,
+    items: run.items.map((item) => ({ ...item, hits: [...item.hits] })),
   };
 }
 
@@ -164,19 +235,25 @@ export async function createKnowledgeStore(filePath) {
   function projectOf(document, projectId) {
     let project = document.projects.find((item) => item.projectId === projectId);
     if (!project) {
-      project = { projectId, cards: [], gaps: [] };
+      project = { projectId, cards: [], gaps: [], regression: emptyRegression() };
       document.projects.push(project);
     }
+    project.regression ??= emptyRegression();
     return project;
   }
 
   function summarize(project) {
     const cards = project.cards.map(cloneCard);
     const gaps = project.gaps.map(cloneGap);
+    const regression = project.regression ?? emptyRegression();
+    const questions = regression.questions.map(cloneRegressionQuestion);
+    const runs = regression.runs.slice(-5).map(cloneRegressionRun);
+    const lastRun = runs.at(-1) ?? null;
     return {
       projectId: project.projectId,
       cards: [...cards].sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
       gaps: [...gaps].sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
+      regression: { questions, runs },
       stats: {
         cards: cards.length,
         pending: cards.filter((card) => card.status === "pending").length,
@@ -184,6 +261,9 @@ export async function createKnowledgeStore(filePath) {
         dropped: cards.filter((card) => card.status === "dropped").length,
         gapsOpen: gaps.filter((gap) => gap.status === "open").length,
         gapsClosed: gaps.filter((gap) => gap.status === "closed").length,
+        regressionQuestions: questions.length,
+        regressionPassed: lastRun ? lastRun.passed : null,
+        regressionTotal: lastRun ? lastRun.total : null,
       },
     };
   }
@@ -283,6 +363,83 @@ export async function createKnowledgeStore(filePath) {
         gap.closedAt = status === "closed" ? new Date().toISOString() : null;
         if (gapNote !== undefined) gap.note = gapNote;
         return cloneGap(gap);
+      });
+    },
+    // Regression questions replay retrieval after an upgrade: the first run
+    // records which cards answered each question, later runs report how many of
+    // those baseline cards are still found. No model call is involved.
+    async addRegressionQuestion(projectId, question) {
+      requireProject(projectId);
+      const value = text(question, "问题", MAX_REGRESSION_QUESTION);
+      if (value.length < 4) throw new TypeError("问题太短");
+      return store.update((document) => {
+        const project = projectOf(document, projectId);
+        const duplicate = project.regression.questions.find((item) => item.q === value);
+        if (duplicate) return cloneRegressionQuestion(duplicate);
+        if (project.regression.questions.length >= MAX_REGRESSION_QUESTIONS) {
+          throw new Error(`回归题最多 ${MAX_REGRESSION_QUESTIONS} 道`);
+        }
+        const item = {
+          id: randomUUID(),
+          q: value,
+          from: "manual",
+          addedAt: new Date().toISOString(),
+        };
+        project.regression.questions.push(item);
+        return cloneRegressionQuestion(item);
+      });
+    },
+    async removeRegressionQuestion(projectId, id) {
+      requireProject(projectId);
+      return store.update((document) => {
+        const project = document.projects.find((item) => item.projectId === projectId);
+        const questions = project?.regression?.questions;
+        if (!questions) return false;
+        const index = questions.findIndex((item) => item.id === id);
+        if (index === -1) return false;
+        questions.splice(index, 1);
+        return true;
+      });
+    },
+    async runRegression(projectId, reason = "手动运行") {
+      requireProject(projectId);
+      const label = typeof reason === "string" && reason.trim()
+        ? reason.trim().slice(0, 120)
+        : "手动运行";
+      return store.update((document) => {
+        const project = projectOf(document, projectId);
+        const questions = project.regression.questions;
+        if (questions.length === 0) return null;
+        const confirmed = project.cards.filter((card) => card.status === "confirmed");
+        const items = questions.map((question) => {
+          const hits = rankCards(confirmed, question.q, REGRESSION_HITS).map((card) => card.id);
+          const pass = hits.length > 0;
+          let retained = null;
+          if (question.baseline?.length) {
+            retained = question.baseline.filter((id) => hits.includes(id)).length / question.baseline.length;
+          } else if (pass) {
+            // The first successful run becomes the baseline to compare against.
+            question.baseline = hits.slice(0, REGRESSION_HITS);
+          }
+          return { id: question.id, q: question.q, hits, pass, retained };
+        });
+        const scored = items.filter((item) => item.retained !== null);
+        const run = {
+          id: randomUUID(),
+          at: new Date().toISOString(),
+          reason: label,
+          total: items.length,
+          passed: items.filter((item) => item.pass).length,
+          retained: scored.length
+            ? Math.round((scored.reduce((sum, item) => sum + item.retained, 0) / scored.length) * 100) / 100
+            : null,
+          items,
+        };
+        project.regression.runs.push(run);
+        if (project.regression.runs.length > MAX_REGRESSION_RUNS) {
+          project.regression.runs = project.regression.runs.slice(-MAX_REGRESSION_RUNS);
+        }
+        return cloneRegressionRun(run);
       });
     },
     // Only confirmed cards are searchable: a pending proposal must not silently

@@ -1131,7 +1131,104 @@ function renderKnowledgeBody() {
 
   columns.append(cardBlock, gapBlock);
   panelBody.append(columns);
-  panelBody.append(element("p", "panel-note", "当前只有知识卡与缺口清单：来源条目索引、问答来源记录与交接包导出尚未迁移。"));
+
+  const regression = knowledgeState.regression ?? { questions: [], runs: [] };
+  const regressionBlock = element("section", "knowledge-block regression-block");
+  const regressionHead = element("div", "knowledge-block-head");
+  regressionHead.append(element("h3", null, "回归题"));
+  const regressionList = element("div", "knowledge-list");
+  const regressionStatus = element("p", "knowledge-error");
+  regressionStatus.hidden = true;
+  const runRegressionButton = actionButton("运行回归", () => void runKnowledgeRegression(regressionStatus));
+  runRegressionButton.classList.add("primary-button");
+  runRegressionButton.disabled = regression.questions.length === 0;
+  const addQuestion = element("button", "quiet-button", "＋ 添加回归题");
+  addQuestion.type = "button";
+  addQuestion.addEventListener("click", () => {
+    regressionHead.hidden = true;
+    const form = regressionForm(refreshKnowledge, () => { regressionHead.hidden = false; form.remove(); });
+    regressionList.prepend(form);
+    form.querySelector("input").focus();
+  });
+  regressionHead.append(runRegressionButton, addQuestion);
+
+  if (regression.questions.length === 0) {
+    regressionList.append(element("p", "knowledge-empty",
+      "还没有回归题。把客户常问的问题加进来，升级后跑一遍就知道检索有没有退化。"));
+  }
+  for (const question of regression.questions) {
+    const row = element("div", "regression-row");
+    row.append(element("span", "regression-question", question.q));
+    row.append(element("span", "regression-meta",
+      question.baseline?.length ? `基线 ${question.baseline.length} 张卡` : "尚无基线"));
+    row.append(actionButton("删除", () => void (async () => {
+      const failure = await knowledgeAction({ action: "regressionRemove", id: question.id });
+      if (!failure) await refreshKnowledge();
+    })()));
+    regressionList.append(row);
+  }
+
+  const lastRun = regression.runs.at(-1) ?? null;
+  // Keep the empty state unambiguous: a run without questions is history, not
+  // something to act on.
+  if (lastRun && regression.questions.length > 0) {
+    regressionList.append(element("p", "regression-summary",
+      `上次运行：${new Date(lastRun.at).toLocaleString()} · 通过 ${lastRun.passed}/${lastRun.total}`
+      + (lastRun.retained === null ? "" : ` · 保留 ${Math.round(lastRun.retained * 100)}%`)
+      + (lastRun.reason ? ` · ${lastRun.reason}` : "")));
+    for (const item of lastRun.items) {
+      const row = element("div", "regression-row");
+      row.append(element("span", `regression-mark ${item.pass ? "pass" : "fail"}`, item.pass ? "✓" : "✗"));
+      row.append(element("span", "regression-question", item.q));
+      row.append(element("span", "regression-meta",
+        `命中 ${item.hits.length}`
+        + (item.retained === null ? "" : ` · 保留 ${Math.round(item.retained * 100)}%`)));
+      regressionList.append(row);
+    }
+  }
+
+  regressionBlock.append(regressionHead, regressionStatus, regressionList);
+  panelBody.append(regressionBlock);
+  panelBody.append(element("p", "panel-note",
+    "回归题会在每次升级后重放本地检索；来源条目索引、问答来源记录与交接包导出尚未迁移。"));
+}
+
+async function runKnowledgeRegression(statusNode) {
+  const failure = await knowledgeAction({ action: "regressionRun", reason: "手动运行" });
+  if (failure) {
+    statusNode.hidden = false;
+    statusNode.textContent = failure;
+    return;
+  }
+  await renderKnowledgeBody();
+}
+
+function regressionForm(onDone, onCancel) {
+  const form = element("form", "knowledge-form");
+  const question = element("input", "knowledge-field");
+  question.placeholder = "客户常问的问题，例如：主推产品是什么？";
+  question.setAttribute("aria-label", "回归题");
+  const error = element("p", "knowledge-error");
+  error.hidden = true;
+  const actions = element("div", "knowledge-form-actions");
+  const submit = element("button", "primary-button", "添加");
+  submit.type = "submit";
+  const cancel = element("button", "quiet-button", "取消");
+  cancel.type = "button";
+  cancel.addEventListener("click", onCancel);
+  actions.append(submit, cancel);
+  form.append(question, actions, error);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const failure = await knowledgeAction({ action: "regressionAdd", question: question.value });
+    if (failure) {
+      error.hidden = false;
+      error.textContent = failure;
+      return;
+    }
+    await onDone();
+  });
+  return form;
 }
 
 async function refreshKnowledge() {

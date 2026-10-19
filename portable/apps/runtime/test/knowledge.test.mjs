@@ -27,7 +27,18 @@ test("a project with no knowledge reads as empty without being written", async (
     const empty = await store.list("project-1");
     assert.deepEqual(empty.cards, []);
     assert.deepEqual(empty.gaps, []);
-    assert.deepEqual(empty.stats, { cards: 0, pending: 0, confirmed: 0, dropped: 0, gapsOpen: 0, gapsClosed: 0 });
+    assert.deepEqual(empty.stats, {
+      cards: 0,
+      pending: 0,
+      confirmed: 0,
+      dropped: 0,
+      gapsOpen: 0,
+      gapsClosed: 0,
+      regressionQuestions: 0,
+      regressionPassed: null,
+      regressionTotal: null,
+    });
+    assert.deepEqual(empty.regression, { questions: [], runs: [] });
     // Nothing exists on disk yet, so a read must not have created the file.
     await assert.rejects(readFile(filePath, "utf8"), /ENOENT/u);
     await assert.rejects(store.list(""), TypeError);
@@ -59,7 +70,15 @@ test("cards start pending and carry validated fields", async () => {
     const confirmed = await store.setCardStatus("project-1", card.id, "confirmed");
     assert.equal(confirmed.status, "confirmed");
     assert.deepEqual((await store.list("project-1")).stats, {
-      cards: 2, pending: 1, confirmed: 1, dropped: 0, gapsOpen: 0, gapsClosed: 0,
+      cards: 2,
+      pending: 1,
+      confirmed: 1,
+      dropped: 0,
+      gapsOpen: 0,
+      gapsClosed: 0,
+      regressionQuestions: 0,
+      regressionPassed: null,
+      regressionTotal: null,
     });
     await assert.rejects(store.setCardStatus("project-1", card.id, "trusted"), /状态无效/u);
     assert.equal(await store.setCardStatus("project-1", "missing", "confirmed"), null);

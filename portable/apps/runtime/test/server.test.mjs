@@ -75,6 +75,8 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     const scriptSource = await script.text();
     assert.match(scriptSource, /submitMessage/);
     assert.match(scriptSource, /knowledgeAction/);
+    assert.match(scriptSource, /regressionRun/);
+    assert.match(scriptSource, /runKnowledgeRegression/);
     assert.match(scriptSource, /openMemory/);
     assert.match(scriptSource, /openEffortMenu/);
     assert.match(scriptSource, /openEngineMenu/);

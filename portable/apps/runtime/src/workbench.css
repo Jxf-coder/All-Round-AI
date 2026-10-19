@@ -159,6 +159,15 @@ html.dark .memory-pending-item{background:#0f1a2c}
 .knowledge-field:focus{outline:none;border-color:#a8b6ff}
 textarea.knowledge-field{min-height:64px;resize:vertical}
 .knowledge-form-actions{display:flex;gap:6px}
+.regression-block{margin-top:12px}
+.regression-row{display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--hairline)}
+.regression-row:last-child{border-bottom:0}
+.regression-question{flex:1;min-width:0;color:var(--ink);font-size:11px;line-height:1.6}
+.regression-meta{flex:none;color:#8290a1;font-size:10px;white-space:nowrap}
+.regression-mark{flex:none;width:14px;font-size:11px;text-align:center}
+.regression-mark.pass{color:#1e9e6a}
+.regression-mark.fail{color:#b4483f}
+.regression-summary{margin:4px 0 0;color:var(--muted);font-size:10px}
 .knowledge-error{margin:0;color:#d93b34;font-size:10px}
 html.dark .panel-copy,html.dark .panel-note,html.dark .knowledge-empty,html.dark .knowledge-stat span{color:#d0def87a}
 html.dark .knowledge-stat,html.dark .knowledge-block,html.dark .knowledge-card,html.dark .knowledge-form{background:#16253ba6;border-color:var(--hairline)}
