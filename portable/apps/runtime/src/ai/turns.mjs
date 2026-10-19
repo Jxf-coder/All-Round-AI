@@ -80,6 +80,7 @@ export function createTurnManager(options = {}) {
       error: turn.error ?? null,
       effort: turn.effort ?? null,
       fast: turn.fast === true,
+      engine: turn.engine ?? null,
       seq: entry ? entry.seq : 0,
       createdAt: turn.createdAt ?? null,
       updatedAt: turn.updatedAt ?? null,
@@ -184,6 +185,7 @@ export function createTurnManager(options = {}) {
     clientTurnId = null,
     effort = null,
     fast = false,
+    engine = null,
   }) {
     // One reply at a time per conversation: sending again replaces the running
     // turn, mirroring the workbench where a new message stops the previous one.
@@ -205,6 +207,7 @@ export function createTurnManager(options = {}) {
       error: null,
       effort: effort ?? null,
       fast: fast === true,
+      engine: engine ?? null,
       createdAt: timestamp,
       updatedAt: timestamp,
       finishedAt: null,

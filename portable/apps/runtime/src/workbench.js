@@ -248,13 +248,21 @@ function appendMessage(className, text = "") {
 // ---------------------------------------------------------------------------
 const modelButton = $("#model-button");
 const modelLabel = $("#model-label");
+const engineButton = $("#engine-button");
+const engineLabel = $("#engine-label");
 const effortButton = $("#effort-button");
 const effortLabel = $("#effort-label");
 const fastToggle = $("#fast-toggle");
 const modelMenu = $("#model-menu");
 let aiSettings = null;
 let efforts = [];
+let engines = [];
 let menuMode = "model";
+// Empty engine means "use the installation default"; the runtime reports which
+// engine it actually used in the reply's meta event.
+let engineChoice = storage.get("engine") || "";
+let defaultEngine = "";
+let resolvedEngine = null;
 // "auto" leaves the level to the runtime, which reports the level it picked in
 // the reply's meta event; an explicit level always wins.
 let effortChoice = storage.get("effort") || "auto";
@@ -274,11 +282,18 @@ function modelName() {
   return aiSettings?.models.find((model) => model.id === aiSettings.model)?.name ?? "选择模型";
 }
 
+function engineName() {
+  const id = engineChoice || resolvedEngine || defaultEngine;
+  return engines.find((engine) => engine.id === id)?.label ?? id ?? "引擎";
+}
+
 function renderModel() {
   modelLabel.textContent = [modelName(), effortDisplay(), fastMode ? "Fast" : null].filter(Boolean).join(" · ");
   modelButton.title = aiSettings
     ? `当前模型：${modelName()}（${aiSettings.providerLabel}）`
     : "选择模型";
+  engineLabel.textContent = engineName();
+  engineButton.title = `当前引擎：${engineName()}`;
   effortLabel.textContent = effortDisplay();
   effortButton.title = `思考强度：${effortDisplay()}${fastMode ? " · Fast" : ""}`;
   fastToggle.classList.toggle("active", fastMode);
@@ -288,6 +303,7 @@ function renderModel() {
 function closeModelMenu() {
   modelMenu.hidden = true;
   modelButton.setAttribute("aria-expanded", "false");
+  engineButton.setAttribute("aria-expanded", "false");
   effortButton.setAttribute("aria-expanded", "false");
 }
 
@@ -304,7 +320,18 @@ async function loadAiSettings() {
     return;
   }
   if (settingsResponse?.ok) aiSettings = await settingsResponse.json();
-  if (modelsResponse?.ok) efforts = (await modelsResponse.json()).efforts ?? [];
+  if (modelsResponse?.ok) {
+    const payload = await modelsResponse.json();
+    efforts = payload.efforts ?? [];
+    engines = payload.engines ?? [];
+    defaultEngine = payload.provider ?? "";
+  }
+  // A remembered engine that no longer exists falls back to the default instead
+  // of sending an unknown id on every turn.
+  if (engineChoice && !engines.some((engine) => engine.id === engineChoice)) {
+    engineChoice = "";
+    storage.set("engine", "");
+  }
   renderModel();
 }
 
@@ -325,6 +352,16 @@ async function selectModel(id) {
   closeModelMenu();
 }
 
+function selectEngine(id) {
+  // Storing the default as "" keeps "follow the installation default" working
+  // if the default ever changes.
+  engineChoice = id === defaultEngine ? "" : id;
+  resolvedEngine = null;
+  storage.set("engine", engineChoice);
+  renderModel();
+  closeModelMenu();
+}
+
 function selectEffort(id) {
   effortChoice = id;
   resolvedEffort = null;
@@ -339,9 +376,14 @@ function toggleFast() {
   renderModel();
 }
 
-// Sent with every turn: an omitted effort means "let the runtime decide".
+// Sent with every turn: an omitted effort means "let the runtime decide", and
+// an omitted engine means "use the installation default".
 function turnOptions() {
-  return { ...(effortChoice === "auto" ? {} : { effort: effortChoice }), fast: fastMode };
+  return {
+    ...(effortChoice === "auto" ? {} : { effort: effortChoice }),
+    fast: fastMode,
+    ...(engineChoice ? { engine: engineChoice } : {}),
+  };
 }
 
 function menuOption(label, note, isActive, onSelect) {
@@ -377,6 +419,29 @@ function openModelMenu() {
   }
   modelMenu.hidden = false;
   modelButton.setAttribute("aria-expanded", "true");
+}
+
+function openEngineMenu() {
+  menuMode = "engine";
+  modelMenu.replaceChildren();
+  const active = engineChoice || resolvedEngine || defaultEngine;
+  if (!engines.length) {
+    const note = document.createElement("div");
+    note.className = "model-note";
+    note.textContent = "引擎列表暂时不可用。";
+    modelMenu.append(note);
+  } else {
+    for (const engine of engines) {
+      modelMenu.append(menuOption(
+        engine.label,
+        engine.id === defaultEngine ? "默认" : "",
+        engine.id === active,
+        () => selectEngine(engine.id),
+      ));
+    }
+  }
+  modelMenu.hidden = false;
+  engineButton.setAttribute("aria-expanded", "true");
 }
 
 function openEffortMenu() {
@@ -440,6 +505,7 @@ function stopLiveHint() {
 function applyTurnMeta(meta) {
   if (!meta) return;
   if (meta.effort) resolvedEffort = meta.effort;
+  if (meta.engine) resolvedEngine = meta.engine;
   renderModel();
 }
 
@@ -1197,6 +1263,10 @@ modelButton.addEventListener("click", () => {
   if (!modelMenu.hidden && menuMode === "model") closeModelMenu();
   else openModelMenu();
 });
+engineButton.addEventListener("click", () => {
+  if (!modelMenu.hidden && menuMode === "engine") closeModelMenu();
+  else openEngineMenu();
+});
 effortButton.addEventListener("click", () => {
   if (!modelMenu.hidden && menuMode === "effort") closeModelMenu();
   else openEffortMenu();
@@ -1209,7 +1279,8 @@ projectButton.addEventListener("click", () => {
 document.addEventListener("click", (event) => {
   if (modelMenu.hidden) return;
   if (isInside(event, modelMenu) || isInside(event, modelButton)
-    || isInside(event, effortButton) || isInside(event, fastToggle)) return;
+    || isInside(event, engineButton) || isInside(event, effortButton)
+    || isInside(event, fastToggle)) return;
   closeModelMenu();
 });
 document.addEventListener("click", (event) => {

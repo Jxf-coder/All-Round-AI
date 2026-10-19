@@ -19,6 +19,7 @@ import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
 import { TERMINAL_TURN_STATUSES, createTurnManager } from "./ai/turns.mjs";
 import { describeEfforts, normalizeEffort, suggestEffort } from "./ai/effort.mjs";
+import { createProviderRegistry } from "./ai/registry.mjs";
 import { createRouter, json, readJsonBody } from "./router.mjs";
 import { displayHost, resolveRuntimeConfiguration } from "./runtime-profile.mjs";
 
@@ -155,14 +156,21 @@ export async function startLocalRuntime(options = {}) {
       void logger.warn("Auth state could not be written", { message: error.message });
     },
   });
-  const aiProvider = options.aiProvider ?? createMockAiProvider();
+  // Engines are providers. The registry keeps the switch honest: the default
+  // provider owns the installation-wide model setting, while any additional
+  // engine runs on its first advertised model until it gains its own settings.
+  const providerRegistry = options.providerRegistry ?? createProviderRegistry({
+    providers: options.aiProviders ?? [options.aiProvider ?? createMockAiProvider()],
+    defaultId: options.defaultEngine,
+  });
+  const defaultProvider = providerRegistry.get(providerRegistry.defaultId);
   // Settings hold the chosen model plus a provider credential, so they go
   // through the encrypting config store backed by a per-installation key.
   const configStore = options.configStore ?? await createConfigStore(
     path.join(directories.config, "settings.json"),
     { masterKey: await loadOrCreateMasterKey(path.join(directories.config, "master-key.json")) },
   );
-  const aiSettings = options.aiSettings ?? createAiSettings({ configStore, provider: aiProvider });
+  const aiSettings = options.aiSettings ?? createAiSettings({ configStore, provider: defaultProvider });
   const conversationStore = options.conversationStore
     ?? await createConversationStore(path.join(directories.config, "conversations.json"));
   // Projects scope the chat history, so every conversation lives in one.
@@ -197,6 +205,20 @@ export async function startLocalRuntime(options = {}) {
   async function readOptionalJsonBody(ctx, options) {
     if (!ctx.request.headers["content-type"]) return {};
     return readJsonBody(ctx.request, options);
+  }
+
+  // Resolves the engine a turn should run on. An explicit engine wins; an
+  // unknown one falls back to the default, which is what a client that never
+  // sends an engine gets too.
+  async function resolveEngineModel(requestedEngine) {
+    const engine = providerRegistry.resolve(requestedEngine);
+    const provider = providerRegistry.get(engine);
+    const model = engine === providerRegistry.defaultId
+      ? await aiSettings.currentModel()
+      // Additional engines have no installation-wide model setting yet, so they
+      // run on the first model they advertise.
+      : (await provider.listModels())[0]?.id ?? "";
+    return { engine, provider, model };
   }
 
   // Opens a Server-Sent Events response and returns a guarded writer. Writing
@@ -297,11 +319,14 @@ export async function startLocalRuntime(options = {}) {
   // and a real Trae provider will be swapped in here later without UI changes.
   router.get("/api/ai/models", async (ctx) => {
     if (!(await requireActor(ctx))) return true;
-    // The effort levels travel with the model list so the composer renders them
-    // from one source of truth instead of a second hard-coded copy.
+    // The engine list and effort levels travel with the models so the composer
+    // renders from one source of truth instead of a second hard-coded copy.
+    const engine = providerRegistry.resolve(ctx.url.searchParams.get("engine"));
+    const provider = providerRegistry.get(engine);
     json(ctx.response, 200, {
-      provider: aiProvider.id,
-      models: await aiProvider.listModels(),
+      provider: engine,
+      engines: providerRegistry.list(),
+      models: await provider.listModels(),
       efforts: describeEfforts(),
     });
     return true;
@@ -348,9 +373,10 @@ export async function startLocalRuntime(options = {}) {
       return true;
     }
     try {
-      const result = await aiProvider.chat({
-        // An explicit model wins; otherwise the configured model is the default.
-        model: typeof body.model === "string" && body.model ? body.model : await aiSettings.currentModel(),
+      const { provider, model } = await resolveEngineModel(body.engine);
+      const result = await provider.chat({
+        // An explicit model wins; otherwise the engine's default is the model.
+        model: typeof body.model === "string" && body.model ? body.model : model,
         messages: body.messages,
         signal: ctx.signal,
       });
@@ -406,6 +432,7 @@ export async function startLocalRuntime(options = {}) {
             status: existing.status,
             effort: existing.effort,
             fast: existing.fast,
+            engine: existing.engine,
           },
         });
         if (TERMINAL_TURN_STATUSES.includes(existing.status)) {
@@ -472,7 +499,7 @@ export async function startLocalRuntime(options = {}) {
       ? normalizeEffort(requestedEffort)
       : suggestEffort(question);
     const fast = body.fast === true;
-    const model = await aiSettings.currentModel();
+    const { engine, provider, model } = await resolveEngineModel(body.engine);
 
     const turn = await turnStore.begin({
       ownerId,
@@ -481,9 +508,21 @@ export async function startLocalRuntime(options = {}) {
       clientTurnId,
       effort,
       fast,
+      engine,
     });
     const send = openEventStream(ctx);
-    send({ meta: { turnId: turn.id, conversationId, clientTurnId, status: "running", model, effort, fast } });
+    send({
+      meta: {
+        turnId: turn.id,
+        conversationId,
+        clientTurnId,
+        status: "running",
+        engine,
+        model,
+        effort,
+        fast,
+      },
+    });
 
     let answer = "";
     let outcome = "done";
@@ -491,7 +530,7 @@ export async function startLocalRuntime(options = {}) {
       // Stage events drive the composer's live hint; they are not part of the
       // reply text, matching how the reference client treats them.
       send({ stage: true, status: "正在读取项目上下文与知识" });
-      for await (const chunk of aiProvider.streamChat({
+      for await (const chunk of provider.streamChat({
         model,
         messages,
         effort,
@@ -562,7 +601,16 @@ export async function startLocalRuntime(options = {}) {
       ctx.response.end();
       return true;
     }
-    send({ meta: { turnId: turn.id, conversationId, status: turn.status, effort: turn.effort, fast: turn.fast } });
+    send({
+      meta: {
+        turnId: turn.id,
+        conversationId,
+        status: turn.status,
+        effort: turn.effort,
+        fast: turn.fast,
+        engine: turn.engine,
+      },
+    });
     if (TERMINAL_TURN_STATUSES.includes(turn.status)) {
       send({ done: true, status: turn.status });
       ctx.response.end();
