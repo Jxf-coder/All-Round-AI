@@ -1085,6 +1085,7 @@ function gapForm(onDone, onCancel) {
 }
 
 let knowledgeState = null;
+let handoverState = null;
 
 async function knowledgeAction(payload) {
   const response = await apiRequest("/api/knowledge", {
@@ -1206,8 +1207,66 @@ function renderKnowledgeBody() {
 
   regressionBlock.append(regressionHead, regressionStatus, regressionList);
   panelBody.append(regressionBlock);
+
+  // Handover export. The bundle stays local, so this block explains where the
+  // file goes and offers the most recent one for download instead of showing a
+  // list that would grow without bound.
+  const handoverBlock = element("section", "knowledge-block handover-block");
+  const handoverHead = element("div", "knowledge-block-head");
+  handoverHead.append(element("h3", null, "知识交接"));
+  const handoverList = element("div", "knowledge-list");
+  const handoverStatus = element("p", "knowledge-error");
+  handoverStatus.hidden = true;
+  const exportButton = actionButton("导出交接包", () => void exportHandover(handoverStatus));
+  exportButton.classList.add("primary-button");
+  handoverHead.append(exportButton);
+  if (handoverState) {
+    const row = element("div", "handover-row");
+    row.append(element("span", "handover-meta",
+      `最近导出：${new Date(handoverState.at).toLocaleString()} · ${handoverState.bytes} 字节`
+      + (handoverState.by ? ` · ${handoverState.by}` : "")));
+    row.append(actionButton("下载", () => downloadHandover(handoverState.file)));
+    handoverList.append(row);
+  } else {
+    handoverList.append(element("p", "knowledge-empty",
+      "导出内容包含知识卡、缺口、回归题与记忆，只写入本机数据目录，不会上传。"));
+  }
+  handoverBlock.append(handoverHead, handoverStatus, handoverList);
+  panelBody.append(handoverBlock);
+
   panelBody.append(element("p", "panel-note",
-    "回归题会在每次升级后重放本地检索；来源条目索引、问答来源记录与交接包导出尚未迁移。"));
+    "回归题会在每次升级后重放本地检索；来源条目索引与开工前问答尚未迁移。"));
+}
+
+async function exportHandover(statusNode) {
+  statusNode.hidden = true;
+  try {
+    const response = await apiRequest("/api/handover", {
+      method: "POST",
+      body: JSON.stringify({ projectId: currentProjectId }),
+    });
+    if (!response) return;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      statusNode.hidden = false;
+      statusNode.textContent = body.error || "导出失败";
+      return;
+    }
+    handoverState = body.info;
+    renderKnowledgeBody();
+  } catch {
+    statusNode.hidden = false;
+    statusNode.textContent = "导出失败，请稍后重试";
+  }
+}
+
+function downloadHandover(file) {
+  const link = document.createElement("a");
+  link.href = `/api/handover/${encodeURIComponent(file)}`;
+  link.download = file;
+  document.body.append(link);
+  link.click();
+  link.remove();
 }
 
 async function runKnowledgeRegression(statusNode) {
@@ -1256,6 +1315,12 @@ async function refreshKnowledge() {
     response = null;
   }
   knowledgeState = response?.ok ? await response.json() : null;
+  try {
+    const latest = await apiRequest(`/api/handover/latest?projectId=${encodeURIComponent(currentProjectId ?? "")}`);
+    handoverState = latest?.ok ? (await latest.json()).info : null;
+  } catch {
+    handoverState = null;
+  }
   renderKnowledgeBody();
 }
 

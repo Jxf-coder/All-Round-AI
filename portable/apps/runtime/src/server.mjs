@@ -16,6 +16,7 @@ import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
 import { buildKnowledgeBlock, createKnowledgeStore } from "./knowledge.mjs";
+import { createHandover, latestHandover, readHandover } from "./handover.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
@@ -203,6 +204,9 @@ export async function startLocalRuntime(options = {}) {
     ?? await createMemoryStore(path.join(directories.config, "memory.json"));
   const knowledgeStore = options.knowledgeStore
     ?? await createKnowledgeStore(path.join(directories.config, "knowledge.json"));
+  // Handover bundles are exports, not live state, so they live beside config
+  // rather than inside it. The directory is created on first export.
+  const handoverDirectory = options.handoverDirectory ?? path.join(directories.data, "handover");
   // In-flight chat turns outlive the request that started them, so they get
   // their own log. Recovery closes turns that were running when the previous
   // process exited, instead of leaving them "running" forever.
@@ -1008,6 +1012,85 @@ export async function startLocalRuntime(options = {}) {
     } catch (error) {
       json(ctx.response, 400, { error: error.message || "知识库操作失败" });
     }
+    return true;
+  });
+
+  // Knowledge handover: one local JSON file containing cards, gaps, regression
+  // questions and memory, so a person or another instance can take over
+  // offline. Nothing is uploaded. A bundle that contains something shaped like
+  // a credential is refused instead of being redacted silently — a handover
+  // that quietly drops fields is worse than one that fails loudly.
+  router.get("/api/handover/latest", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const requested = ctx.url.searchParams.get("projectId");
+    if (requested && !(await projectStore.get(requested))) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    const info = await latestHandover(handoverDirectory);
+    json(ctx.response, 200, {
+      info: info && (!requested || info.projectId === requested) ? info : null,
+    });
+    return true;
+  });
+
+  router.post("/api/handover", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const defaultProjectId = await projectStore.defaultRootId();
+    const projectId = typeof body.projectId === "string" && body.projectId ? body.projectId : defaultProjectId;
+    const project = await projectStore.get(projectId);
+    if (!project) {
+      json(ctx.response, 404, { error: "项目不存在" });
+      return true;
+    }
+    const [memory, knowledge] = await Promise.all([
+      memoryStore.get(projectId),
+      knowledgeStore.list(projectId),
+    ]);
+    try {
+      const info = await createHandover({
+        directory: handoverDirectory,
+        project,
+        memory,
+        knowledge,
+        generatedBy: String(actor.name ?? ""),
+      });
+      json(ctx.response, 200, { info });
+    } catch (error) {
+      if (error.code === "SECRET_DETECTED") {
+        json(ctx.response, 409, { error: error.message });
+        return true;
+      }
+      json(ctx.response, 500, { error: "交接包导出失败" });
+    }
+    return true;
+  });
+
+  // The file route only ever serves names that the export itself produces; the
+  // pattern check is the path-traversal guard, so no path is joined first.
+  router.get("/api/handover/:file", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const body = await readHandover(handoverDirectory, ctx.params.file);
+    if (!body) {
+      json(ctx.response, 404, { error: "交接包不存在" });
+      return true;
+    }
+    ctx.response.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+      "content-disposition": `attachment; filename="${ctx.params.file}"`,
+      "content-length": String(body.length),
+      "x-content-type-options": "nosniff",
+    });
+    ctx.response.end(body);
     return true;
   });
 
