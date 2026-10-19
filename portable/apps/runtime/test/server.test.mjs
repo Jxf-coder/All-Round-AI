@@ -913,10 +913,11 @@ test("runtime command starts, answers health checks, logs, and shuts down cleanl
     const runtimeUrl = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`runtime did not start: ${errors}`)), 5000);
       const checkReady = () => {
-        const match = output.match(/All-Round-AI local runtime: (http:\/\/127\.0\.0\.1:\d+)\/login/);
+        const match = output.match(/All-Round-AI runtime \((local|server)\): (http:\/\/[^\s]+)\/login/);
         if (match) {
           clearTimeout(timer);
-          resolve(match[1]);
+          assert.equal(match[1], "local");
+          resolve(match[2]);
         }
       };
       child.stdout.on("data", checkReady);

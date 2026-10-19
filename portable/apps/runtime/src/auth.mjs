@@ -23,13 +23,23 @@ function cookie(request) {
   return "";
 }
 
-function originAllowed(request) {
+// Local installs only accept loopback origins. A server install behind a TLS
+// proxy has a real hostname, so it either trusts a configured allowlist or
+// accepts any http(s) origin that matches the request host.
+function originAllowed(request, policy = {}) {
   const origin = request.headers.origin;
   if (!origin) return true;
   try {
     const parsed = new URL(origin);
+    if (Array.isArray(policy.allowedOrigins) && policy.allowedOrigins.length) {
+      return policy.allowedOrigins.includes(parsed.origin);
+    }
+    const requestHost = String(request.headers.host || "").toLowerCase();
+    if (parsed.host.toLowerCase() !== requestHost) return false;
+    if (policy.allowRemoteOrigin === true) {
+      return parsed.protocol === "http:" || parsed.protocol === "https:";
+    }
     return parsed.protocol === "http:"
-      && parsed.host.toLowerCase() === String(request.headers.host || "").toLowerCase()
       && ["127.0.0.1", "localhost"].includes(parsed.hostname.toLowerCase());
   } catch {
     return false;
@@ -86,6 +96,15 @@ export function createLocalAuth(options = {}) {
   const loginFailures = options.initialState?.loginFailures ?? new Map();
   const stateStore = options.stateStore ?? null;
   const onPersistError = options.onPersistError ?? null;
+  const secureCookies = options.secureCookies === true;
+  const allowedOrigins = Array.isArray(options.allowedOrigins) ? options.allowedOrigins : [];
+  const originPolicy = {
+    allowRemoteOrigin: options.allowRemoteOrigin === true,
+    allowedOrigins,
+  };
+  // `Secure` is only meaningful behind TLS; a local install stays plain HTTP on
+  // loopback, where a Secure cookie would never be sent back.
+  const cookieAttributes = `Path=/; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`;
   let pendingPersist = Promise.resolve();
 
   // Session and throttle state is authoritative in memory and mirrored to disk
@@ -184,7 +203,7 @@ export function createLocalAuth(options = {}) {
         json(response, 405, { error: "Method not allowed" }, { allow: "POST" });
         return true;
       }
-      if (!originAllowed(request)) {
+      if (!originAllowed(request, originPolicy)) {
         json(response, 403, { error: "请求来源无效" });
         return true;
       }
@@ -265,7 +284,7 @@ export function createLocalAuth(options = {}) {
         landing: safePath(result.landing),
         ...(guestOf ? { guestOf } : {}),
       }, {
-        "set-cookie": COOKIE + "=" + id + "; Path=/; HttpOnly; SameSite=Lax",
+        "set-cookie": COOKIE + "=" + id + "; " + cookieAttributes,
       });
       return true;
     }
@@ -274,7 +293,7 @@ export function createLocalAuth(options = {}) {
         json(response, 405, { error: "Method not allowed" }, { allow: "POST" });
         return true;
       }
-      if (!originAllowed(request)) {
+      if (!originAllowed(request, originPolicy)) {
         json(response, 403, { error: "请求来源无效" });
         return true;
       }
@@ -331,7 +350,7 @@ export function createLocalAuth(options = {}) {
       });
       void persist();
       json(response, 200, { ok: true, user: identity }, {
-        "set-cookie": COOKIE + "=" + id + "; Path=/; HttpOnly; SameSite=Lax",
+        "set-cookie": COOKIE + "=" + id + "; " + cookieAttributes,
       });
       return true;
     }
@@ -351,14 +370,14 @@ export function createLocalAuth(options = {}) {
         json(response, 405, { error: "Method not allowed" }, { allow: "POST" });
         return true;
       }
-      if (!originAllowed(request)) {
+      if (!originAllowed(request, originPolicy)) {
         json(response, 403, { error: "请求来源无效" });
         return true;
       }
       const id = cookie(request);
       if (id && sessions.delete(id)) void persist();
       json(response, 200, { ok: true }, {
-        "set-cookie": COOKIE + "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        "set-cookie": COOKIE + "=; " + cookieAttributes + "; Max-Age=0",
       });
       return true;
     }

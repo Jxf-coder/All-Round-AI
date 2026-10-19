@@ -20,6 +20,7 @@ import { selectContextMessages } from "./ai/context.mjs";
 import { TERMINAL_TURN_STATUSES, createTurnManager } from "./ai/turns.mjs";
 import { describeEfforts, normalizeEffort, suggestEffort } from "./ai/effort.mjs";
 import { createRouter, json, readJsonBody } from "./router.mjs";
+import { displayHost, resolveRuntimeConfiguration } from "./runtime-profile.mjs";
 
 const DEFAULT_PORT = 3141;
 const WORKBENCH_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -121,6 +122,16 @@ function redirect(response, location, status = 302) {
 export async function startLocalRuntime(options = {}) {
   const env = options.env ?? process.env;
   const port = parsePort(options.port ?? env.ALLROUND_AI_PORT ?? DEFAULT_PORT);
+  // `local` and `server` are two configurations of one application. Remote
+  // exposure stays opt-in, and TLS proxy settings only change cookie/origin
+  // behaviour — never a business branch.
+  const runtimeConfig = resolveRuntimeConfiguration({
+    profile: options.profile ?? env.ALLROUND_AI_PROFILE,
+    host: options.host ?? env.ALLROUND_AI_HOST,
+    secureCookies: options.secureCookies ?? env.ALLROUND_AI_SECURE_COOKIES,
+    allowedOrigins: options.allowedOrigins ?? env.ALLROUND_AI_ALLOWED_ORIGINS,
+    allowRemote: options.allowRemote ?? env.ALLROUND_AI_ALLOW_REMOTE,
+  });
   const directories = await ensureAppDirectories(options);
   const logger = createAppLogger(path.join(directories.logs, "runtime.jsonl"));
   const accountStore = options.accountStore ?? await createAccountStore(path.join(directories.config, "accounts.json"));
@@ -137,6 +148,9 @@ export async function startLocalRuntime(options = {}) {
     now: options.authNow,
     stateStore: authStateStore,
     initialState: authState,
+    secureCookies: runtimeConfig.secureCookies,
+    allowedOrigins: runtimeConfig.allowedOrigins,
+    allowRemoteOrigin: runtimeConfig.allowRemoteOrigin,
     onPersistError: (error) => {
       void logger.warn("Auth state could not be written", { message: error.message });
     },
@@ -817,17 +831,22 @@ export async function startLocalRuntime(options = {}) {
 
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen({ host: "127.0.0.1", port }, resolve);
+    server.listen({ host: runtimeConfig.host, port }, resolve);
   });
 
   const address = server.address();
-  const url = `http://127.0.0.1:${address.port}`;
-  await logger.info("Local runtime started", { port: address.port });
+  const url = `http://${displayHost(runtimeConfig.host)}:${address.port}`;
+  await logger.info("Local runtime started", {
+    port: address.port,
+    profile: runtimeConfig.profile,
+    host: runtimeConfig.host,
+  });
 
   let closePromise;
   return Object.freeze({
     address,
     directories,
+    profile: runtimeConfig.profile,
     url,
     close() {
       closePromise ??= closeServer(server).then(async () => {
