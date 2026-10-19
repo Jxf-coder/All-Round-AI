@@ -67,8 +67,10 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(scriptSource, /openMemory/);
     assert.match(scriptSource, /openEffortMenu/);
     assert.match(scriptSource, /openEngineMenu/);
+    assert.match(scriptSource, /rememberPageContext/);
     assert.match(scriptSource, /stopLiveHint/);
     assert.match(pageHtml, /id="engine-button"/);
+    assert.match(pageHtml, /id="page-context-hint"/);
     assert.match(pageHtml, /id="effort-button"/);
     assert.match(pageHtml, /id="fast-toggle"/);
     assert.match(pageHtml, /id="live-hint"/);

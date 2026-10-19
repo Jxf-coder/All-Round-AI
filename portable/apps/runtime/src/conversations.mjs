@@ -8,9 +8,28 @@ const MAX_CONTENT_LENGTH = 8_000;
 const MAX_TITLE_LENGTH = 120;
 const MESSAGE_ROLES = new Set(["user", "assistant"]);
 const DEFAULT_TITLE = "新对话";
+const MAX_PAGE_PANEL_LENGTH = 40;
+const MAX_PAGE_LABEL_LENGTH = 80;
 
 function isIsoTimestamp(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+// Which panel a conversation was last viewed in. It lets the workbench offer
+// "where you left off" without touching the conversation's sort order.
+function normalizePageContext(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("A page context must be an object");
+  }
+  const panel = typeof value.panel === "string" ? value.panel.trim() : "";
+  if (!panel || panel.length > MAX_PAGE_PANEL_LENGTH) {
+    throw new TypeError("A page context panel is required");
+  }
+  const label = typeof value.label === "string"
+    ? value.label.trim().slice(0, MAX_PAGE_LABEL_LENGTH)
+    : "";
+  return { panel, label };
 }
 
 function validateDocument(value) {
@@ -28,6 +47,11 @@ function validateDocument(value) {
       // have none and are still readable (they count as unassigned).
       || (conversation.projectId !== undefined && conversation.projectId !== null
         && typeof conversation.projectId !== "string")
+      // pageContext arrived with per-session page memory; older records have
+      // none and remain readable.
+      || (conversation.pageContext !== undefined && conversation.pageContext !== null
+        && (typeof conversation.pageContext !== "object"
+          || typeof conversation.pageContext.panel !== "string"))
       || !Array.isArray(conversation.messages)) {
       throw new Error("All Round AI conversation store contains an invalid conversation");
     }
@@ -60,6 +84,7 @@ function summarize(conversation) {
     title: conversation.title,
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
+    pageContext: conversation.pageContext ?? null,
     messageCount: conversation.messages.length,
   };
 }
@@ -167,6 +192,18 @@ export async function createConversationStore(filePath) {
         conversation.messages.pop();
         conversation.updatedAt = new Date().toISOString();
         return true;
+      });
+    },
+    // Remembering where the user was is bookkeeping, not conversation activity:
+    // it deliberately does not touch `updatedAt`, so history order stays stable.
+    async setPageContext(ownerId, conversationId, pageContext) {
+      if (typeof ownerId !== "string" || !ownerId) throw new TypeError("A conversation owner is required");
+      const normalized = normalizePageContext(pageContext);
+      return store.update((document) => {
+        const conversation = document.conversations.find((item) => item.id === conversationId);
+        if (!conversation || conversation.ownerId !== ownerId) return null;
+        conversation.pageContext = normalized;
+        return normalized ? { ...normalized } : null;
       });
     },
     async remove(ownerId, conversationId) {

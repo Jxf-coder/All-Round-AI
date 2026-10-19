@@ -159,6 +159,9 @@ async function openConversation(id) {
     appendMessage(message.role === "user" ? "" : "assistant-message", message.content);
   }
   renderReplyActions(document_.messages);
+  // Offer the panel this conversation was last viewed in, without hiding the
+  // reply the user just opened.
+  renderPageContextHint(document_.pageContext);
   await loadHistory();
   // A reply can still be running on the server after a refresh or a reopen;
   // reattach to its live stream so the answer keeps appearing.
@@ -1025,15 +1028,65 @@ function renderPlaceholderPanel(label) {
 // Which view the main area is showing, so switching project can refresh it
 // instead of leaving the previous project's panel on screen.
 let activePanel = "agent";
+const pageContextHint = $("#page-context-hint");
+const pageContextLabel = $("#page-context-label");
+const pageContextOpen = $("#page-context-open");
+let rememberedPanel = null;
 
-function showAgentView() {
+// Switching back to the chat keeps the open conversation; only an explicit
+// "new conversation" action starts a fresh one.
+function showAgentView({ keepConversation = false } = {}) {
   activePanel = "agent";
   panelView.hidden = true;
   conversation.hidden = false;
   composer.hidden = false;
-  welcome.classList.remove("hidden");
-  conversation.replaceChildren();
-  activeConversationId = null;
+  if (keepConversation && activeConversationId) {
+    welcome.classList.add("hidden");
+  } else {
+    welcome.classList.remove("hidden");
+    conversation.replaceChildren();
+    activeConversationId = null;
+  }
+  pageContextHint.hidden = true;
+  rememberedPanel = null;
+}
+
+// The runtime remembers the panel per conversation, but opening a panel hides
+// the chat. It is therefore offered back as a one-click hint rather than
+// replacing the conversation the user just opened.
+function renderPageContextHint(pageContext) {
+  const panel = pageContext?.panel ?? null;
+  if (!panel || panel === "agent" || panel === activePanel) {
+    pageContextHint.hidden = true;
+    rememberedPanel = null;
+    return;
+  }
+  rememberedPanel = { panel, label: pageContext.label || panel };
+  pageContextLabel.textContent = rememberedPanel.label;
+  pageContextHint.hidden = false;
+}
+
+// Fire-and-forget: bookkeeping must never block navigation or surface errors.
+function rememberPageContext(panel, label) {
+  if (!activeConversationId) return;
+  void fetch(`/api/conversations/${encodeURIComponent(activeConversationId)}/context`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ panel, label }),
+  }).catch(() => {});
+}
+
+function openRememberedPanel() {
+  if (!rememberedPanel) return;
+  const { panel, label } = rememberedPanel;
+  document.querySelectorAll(".rail-item").forEach(
+    (item) => item.classList.toggle("active", item.dataset.panel === panel),
+  );
+  $("#current-section").textContent = label;
+  showPanelView(panel, label);
+  pageContextHint.hidden = true;
+  rememberedPanel = null;
+  rememberPageContext(panel, label);
 }
 
 function showPanelView(panel, label) {
@@ -1300,7 +1353,8 @@ document.querySelectorAll(".memory-tab").forEach((tab) => tab.addEventListener("
   memoryTab = tab.dataset.memoryTab;
   renderMemory();
 }));
-$("#new-agent").addEventListener("click", () => { conversation.replaceChildren(); welcome.classList.remove("hidden"); startConversation(); });
+$("#new-agent").addEventListener("click", () => { pageContextHint.hidden = true; rememberedPanel = null; conversation.replaceChildren(); welcome.classList.remove("hidden"); startConversation(); });
+pageContextOpen.addEventListener("click", openRememberedPanel);
 $("#drawer-start").addEventListener("click", () => startConversation());
 $("#agent-toggle").addEventListener("click", () => drawer.classList.toggle("open"));
 $("#drawer-close").addEventListener("click", () => drawer.classList.remove("open"));
@@ -1335,8 +1389,9 @@ document.querySelectorAll(".rail-item").forEach((button) => button.addEventListe
   $("#current-section").textContent = label;
   // The rail switches the main area: Agent is the chat, 知识库 is real, and the
   // rest still say plainly that they are not migrated.
-  if (panel === "agent") showAgentView();
+  if (panel === "agent") showAgentView({ keepConversation: true });
   else showPanelView(panel, label);
+  rememberPageContext(panel, label);
   if (matchMedia("(max-width: 640px)").matches) rail.classList.remove("mobile-open");
 }));
 document.querySelectorAll(".top-tab").forEach((button) => button.addEventListener("click", () => {
@@ -1345,7 +1400,8 @@ document.querySelectorAll(".top-tab").forEach((button) => button.addEventListene
   document.querySelectorAll(".rail-item").forEach((item) => item.classList.toggle("active", !isOps && item.dataset.panel === "agent"));
   $("#current-section").textContent = isOps ? "经营台" : "Agent";
   if (isOps) showPanelView("ops", "经营台");
-  else showAgentView();
+  else showAgentView({ keepConversation: true });
+  rememberPageContext(isOps ? "ops" : "agent", isOps ? "经营台" : "Agent");
 }));
 
 // The project scope has to be known before the rail is read, so bootstrapping

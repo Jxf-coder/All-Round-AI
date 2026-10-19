@@ -221,6 +221,18 @@ export async function startLocalRuntime(options = {}) {
     return { engine, provider, model };
   }
 
+  const PAGE_PANELS = new Set(["agent", "mcp", "skills", "automation", "database", "ops"]);
+
+  // Page context is a hint, never content: an unknown panel is dropped instead
+  // of being stored and offered back later.
+  function normalizePageContext(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const panel = typeof value.panel === "string" ? value.panel.trim() : "";
+    if (!PAGE_PANELS.has(panel)) return null;
+    const label = typeof value.label === "string" ? value.label.trim().slice(0, 80) : "";
+    return { panel, label };
+  }
+
   // Opens a Server-Sent Events response and returns a guarded writer. Writing
   // after the client is gone is skipped rather than thrown, because a turn
   // deliberately keeps running when its browser disconnects.
@@ -853,6 +865,32 @@ export async function startLocalRuntime(options = {}) {
       return true;
     }
     json(ctx.response, 200, { conversation });
+    return true;
+  });
+
+  // Remembers which panel a conversation was last viewed in. Bookkeeping only:
+  // it never changes message order or the conversation's updatedAt.
+  router.post("/api/conversations/:id/context", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    let body;
+    try {
+      body = await readOptionalJsonBody(ctx);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "请求格式错误" });
+      return true;
+    }
+    const pageContext = normalizePageContext(body);
+    if (!pageContext) {
+      json(ctx.response, 400, { error: "页面上下文无效" });
+      return true;
+    }
+    const saved = await conversationStore.setPageContext(String(actor.id), ctx.params.id, pageContext);
+    if (!saved) {
+      json(ctx.response, 404, { error: "对话不存在" });
+      return true;
+    }
+    json(ctx.response, 200, { ok: true, pageContext: saved });
     return true;
   });
 

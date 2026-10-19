@@ -158,3 +158,7 @@ html.dark .fast-toggle.active{background:rgba(108,132,255,.2);border-color:rgba(
 .live-hint .live-dot{flex:none;width:6px;height:6px;border-radius:50%;background:#2543ff;animation:live-pulse 1.2s ease-in-out infinite}
 @keyframes live-pulse{0%,100%{opacity:.3}50%{opacity:1}}
 @media(prefers-reduced-motion:reduce){.live-hint .live-dot{animation:none;opacity:.8}}
+.page-context-hint{display:flex;align-items:center;gap:6px;margin-left:10px;color:var(--muted);font-size:11px}
+.page-context-hint[hidden]{display:none}
+.page-context-hint b{color:var(--ink);font-weight:600}
+.page-context-hint .quiet-button{padding:0 6px;font-size:11px}
