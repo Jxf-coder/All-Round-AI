@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { createAccountStore } from "./accounts.mjs";
 import { ensureAppDirectories } from "../../../packages/platform/src/directories.mjs";
+import { runDataMigrations } from "../../../packages/platform/src/migrations.mjs";
+import { RUNTIME_SCHEMA_MIGRATIONS } from "./migrations.mjs";
 
 const [command, rawUsername] = process.argv.slice(2);
 const role = command === "create-admin" ? "admin" : command === "create-member" ? "member" : null;
@@ -12,6 +14,10 @@ if ((!role && command !== "reset-password") || !rawUsername) {
 } else {
   try {
     const directories = await ensureAppDirectories();
+    await runDataMigrations({
+      dataDir: directories.data,
+      migrations: RUNTIME_SCHEMA_MIGRATIONS,
+    });
     const store = await createAccountStore(path.join(directories.config, "accounts.json"));
     const password = randomBytes(24).toString("base64url");
     if (command === "reset-password") {

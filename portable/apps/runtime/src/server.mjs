@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { ensureAppDirectories } from "../../../packages/platform/src/directories.mjs";
 import { createAppLogger } from "../../../packages/platform/src/logging.mjs";
+import { runDataMigrations } from "../../../packages/platform/src/migrations.mjs";
+import { RUNTIME_SCHEMA_MIGRATIONS } from "./migrations.mjs";
 import { createAccountProvider, createAccountStore } from "./accounts.mjs";
 import { createAuthStateStore } from "./auth-state.mjs";
 import { createLocalAuth } from "./auth.mjs";
@@ -135,6 +137,20 @@ export async function startLocalRuntime(options = {}) {
   });
   const directories = await ensureAppDirectories(options);
   const logger = createAppLogger(path.join(directories.logs, "runtime.jsonl"));
+  // Migrations run before any store opens a document: the stores are
+  // fail-closed, so reading an older shape first would make the instance
+  // refuse to start instead of upgrading it.
+  const migration = await runDataMigrations({
+    dataDir: directories.data,
+    migrations: RUNTIME_SCHEMA_MIGRATIONS,
+  });
+  if (migration.applied.length > 0) {
+    await logger.info("Data schema migrated", {
+      schemaVersion: migration.schemaVersion,
+      applied: migration.applied.map((entry) => entry.version),
+      backupDirectory: migration.backupDirectory,
+    });
+  }
   const accountStore = options.accountStore ?? await createAccountStore(path.join(directories.config, "accounts.json"));
   // Session and login-throttle state is hydrated from disk so a restart no
   // longer signs everyone out or clears the login throttle.
@@ -933,6 +949,7 @@ export async function startLocalRuntime(options = {}) {
     address,
     directories,
     profile: runtimeConfig.profile,
+    schemaVersion: migration.schemaVersion,
     url,
     close() {
       closePromise ??= closeServer(server).then(async () => {

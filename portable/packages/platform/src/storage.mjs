@@ -16,6 +16,37 @@ const FILE_MODE = 0o600;
 //   - updates within one process are serialised through a promise chain.
 // ---------------------------------------------------------------------------
 
+// Atomic JSON write shared by the store and by migrations: temp file in the
+// same directory, fsync, rename over the target. A reader therefore sees
+// either the previous document or the next one, never a partial write.
+export async function writeJsonFile(filePath, document) {
+  if (typeof filePath !== "string" || !path.isAbsolute(filePath)) {
+    throw new TypeError("An absolute store path is required");
+  }
+  const directory = path.dirname(filePath);
+  await mkdir(directory, { recursive: true, mode: DIRECTORY_MODE });
+  await access(directory, 2);
+  if (process.platform !== "win32") await chmod(directory, DIRECTORY_MODE);
+  const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  let handle;
+  try {
+    handle = await open(temporaryPath, "wx", FILE_MODE);
+    await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await rename(temporaryPath, filePath);
+    if (process.platform !== "win32") {
+      const directoryHandle = await open(directory, "r");
+      try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+    }
+  } catch (error) {
+    if (handle) await handle.close().catch(() => {});
+    await rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 export function createJsonFileStore(filePath, options = {}) {
   if (typeof filePath !== "string" || !path.isAbsolute(filePath)) {
     throw new TypeError("An absolute store path is required");
@@ -42,28 +73,7 @@ export function createJsonFileStore(filePath, options = {}) {
   }
 
   async function write(document) {
-    const directory = path.dirname(filePath);
-    await mkdir(directory, { recursive: true, mode: DIRECTORY_MODE });
-    await access(directory, 2);
-    if (process.platform !== "win32") await chmod(directory, DIRECTORY_MODE);
-    const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
-    let handle;
-    try {
-      handle = await open(temporaryPath, "wx", FILE_MODE);
-      await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf8");
-      await handle.sync();
-      await handle.close();
-      handle = null;
-      await rename(temporaryPath, filePath);
-      if (process.platform !== "win32") {
-        const directoryHandle = await open(directory, "r");
-        try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
-      }
-    } catch (error) {
-      if (handle) await handle.close().catch(() => {});
-      await rm(temporaryPath, { force: true }).catch(() => {});
-      throw error;
-    }
+    await writeJsonFile(filePath, document);
   }
 
   // The mutator receives a fresh document, may change it in place, and returns
