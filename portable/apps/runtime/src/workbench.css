@@ -53,6 +53,7 @@ html.dark .model-option.active{background:rgba(108,132,255,.18);color:var(--ink)
 html.dark .model-note{color:#d0def87a}
 
 /* Per-answer actions and the stop state of the send button. */
+.message-citations{align-self:flex-start;max-width:82%;margin:-6px 0 10px 14px;color:#8290a1;font-size:10px;line-height:1.5}
 .message-actions{align-self:flex-start;display:flex;gap:8px;margin-top:-6px}
 .message-action{padding:4px 9px;border:1px solid var(--hairline);border-radius:7px;background:transparent;color:#8290a1;font-size:10px;cursor:pointer}
 .message-action:hover{background:var(--chip);color:var(--ink)}

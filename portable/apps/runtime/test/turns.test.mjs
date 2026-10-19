@@ -40,6 +40,28 @@ test("a turn is persisted as running and exposes no internals", async () => {
   });
 });
 
+test("a turn keeps the knowledge cards it was given", async () => {
+  await withManager(async (manager) => {
+    const turn = await manager.begin({
+      ownerId: "u1",
+      conversationId: "c1",
+      clientTurnId: "turn-citations",
+      citations: [
+        { id: "card-1", title: "主推产品", kind: "fact" },
+        { id: "card-1", title: "重复", kind: "fact" },
+        { id: "broken" },
+      ],
+    });
+    assert.deepEqual(turn.citations, [{ id: "card-1", title: "主推产品", kind: "fact" }]);
+    const found = await manager.findByClientTurnId({
+      ownerId: "u1",
+      conversationId: "c1",
+      clientTurnId: "turn-citations",
+    });
+    assert.deepEqual(found.citations, turn.citations);
+  });
+});
+
 test("deltas accumulate in order, are sequenced, and replay to a subscriber", async () => {
   await withManager(async (manager) => {
     const turn = await manager.begin({ ownerId: "u1", conversationId: "c1" });

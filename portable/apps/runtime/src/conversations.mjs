@@ -10,9 +10,44 @@ const MESSAGE_ROLES = new Set(["user", "assistant"]);
 const DEFAULT_TITLE = "新对话";
 const MAX_PAGE_PANEL_LENGTH = 40;
 const MAX_PAGE_LABEL_LENGTH = 80;
+const MAX_CITATIONS = 8;
+const MAX_CITATION_TITLE = 120;
 
 function isIsoTimestamp(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+// Which knowledge cards a reply was built from. Only the reference fields are
+// kept: a citation is a pointer for the reader, not a copy of the card body.
+function normalizeCitations(value) {
+  if (!Array.isArray(value)) throw new TypeError("引用来源必须是数组");
+  const seen = new Set();
+  const citations = [];
+  for (const citation of value.slice(0, MAX_CITATIONS)) {
+    if (!citation || typeof citation !== "object"
+      || typeof citation.id !== "string" || !citation.id
+      || typeof citation.title !== "string" || !citation.title.trim()) {
+      throw new TypeError("引用来源格式无效");
+    }
+    const id = citation.id.trim();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    citations.push({
+      id,
+      title: citation.title.trim().slice(0, MAX_CITATION_TITLE),
+      kind: typeof citation.kind === "string" ? citation.kind : null,
+    });
+  }
+  return citations;
+}
+
+function citationsAreValid(value) {
+  try {
+    normalizeCitations(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Which panel a conversation was last viewed in. It lets the workbench offer
@@ -60,7 +95,9 @@ function validateDocument(value) {
         || typeof message.id !== "string"
         || !MESSAGE_ROLES.has(message.role)
         || typeof message.content !== "string"
-        || !isIsoTimestamp(message.createdAt)) {
+        || !isIsoTimestamp(message.createdAt)
+        // Citations arrived with answer provenance; older messages have none.
+        || (message.citations !== undefined && !citationsAreValid(message.citations))) {
         throw new Error("All Round AI conversation store contains an invalid message");
       }
     }
@@ -156,13 +193,14 @@ export async function createConversationStore(filePath) {
         messages: conversation.messages.map((message) => ({ ...message })),
       };
     },
-    async appendMessage(ownerId, conversationId, { role, content } = {}) {
+    async appendMessage(ownerId, conversationId, { role, content, citations } = {}) {
       if (typeof ownerId !== "string" || !ownerId) throw new TypeError("A conversation owner is required");
       if (!MESSAGE_ROLES.has(role)) throw new TypeError("Message role must be user or assistant");
       if (typeof content !== "string" || !content.trim()) throw new TypeError("Message content must not be empty");
       if (content.length > MAX_CONTENT_LENGTH) {
         throw new TypeError(`消息长度不能超过 ${MAX_CONTENT_LENGTH} 个字符`);
       }
+      const messageCitations = citations === undefined ? [] : normalizeCitations(citations);
       return store.update((document) => {
         const conversation = document.conversations.find((item) => item.id === conversationId);
         if (!conversation || conversation.ownerId !== ownerId) return null;
@@ -171,6 +209,7 @@ export async function createConversationStore(filePath) {
         }
         const now = new Date().toISOString();
         const message = { id: randomUUID(), role, content, createdAt: now };
+        if (messageCitations.length > 0) message.citations = messageCitations;
         conversation.messages.push(message);
         conversation.updatedAt = now;
         // The first user turn names the conversation, matching how the

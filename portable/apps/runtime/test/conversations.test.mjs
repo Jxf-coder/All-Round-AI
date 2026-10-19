@@ -54,6 +54,39 @@ test("long titles are truncated instead of growing unbounded", () => {
   assert.equal(conversationTitle("多  空格\n换行"), "多 空格 换行");
 });
 
+test("an answer records only the references that produced it", async () => {
+  await withStore(async ({ store }) => {
+    const { id } = await store.create("user-1");
+    const message = await store.appendMessage("user-1", id, {
+      role: "assistant",
+      content: "主推产品是折叠彩虹琴。",
+      citations: [
+        { id: "card-1", title: "主推产品", kind: "fact" },
+        { id: "card-1", title: "重复引用", kind: "fact" },
+        { id: "card-2", title: "价格" },
+      ],
+    });
+    assert.deepEqual(message.citations, [
+      { id: "card-1", title: "主推产品", kind: "fact" },
+      { id: "card-2", title: "价格", kind: null },
+    ]);
+    assert.deepEqual((await store.get("user-1", id)).messages[0].citations, message.citations);
+
+    // A message without references keeps the old shape.
+    const plain = await store.appendMessage("user-1", id, { role: "user", content: "谢谢" });
+    assert.equal("citations" in plain, false);
+
+    await assert.rejects(
+      store.appendMessage("user-1", id, { role: "assistant", content: "x", citations: "nope" }),
+      /必须是数组/u,
+    );
+    await assert.rejects(
+      store.appendMessage("user-1", id, { role: "assistant", content: "x", citations: [{ id: "", title: "x" }] }),
+      /格式无效/u,
+    );
+  });
+});
+
 test("conversations are scoped to their owner", async () => {
   await withStore(async ({ store }) => {
     const { id } = await store.create("user-1");

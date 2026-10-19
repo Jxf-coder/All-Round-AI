@@ -77,6 +77,8 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(scriptSource, /knowledgeAction/);
     assert.match(scriptSource, /regressionRun/);
     assert.match(scriptSource, /runKnowledgeRegression/);
+    assert.match(scriptSource, /renderCitations/);
+    assert.match(styleSource, /\.message-citations\{/);
     assert.match(scriptSource, /openMemory/);
     assert.match(scriptSource, /openEffortMenu/);
     assert.match(scriptSource, /openEngineMenu/);

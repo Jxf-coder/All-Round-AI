@@ -156,7 +156,8 @@ async function openConversation(id) {
   conversation.replaceChildren();
   welcome.classList.add("hidden");
   for (const message of document_.messages) {
-    appendMessage(message.role === "user" ? "" : "assistant-message", message.content);
+    const bubble = appendMessage(message.role === "user" ? "" : "assistant-message", message.content);
+    if (message.role === "assistant") renderCitations(bubble, message.citations);
   }
   renderReplyActions(document_.messages);
   // Offer the panel this conversation was last viewed in, without hiding the
@@ -241,6 +242,22 @@ function appendMessage(className, text = "") {
   conversation.append(node);
   conversation.scrollTop = conversation.scrollHeight;
   return node;
+}
+
+// Answer provenance: the knowledge cards the runtime actually injected. Kept
+// next to the bubble instead of inside it so copy actions never include it.
+function renderCitations(bubble, citations) {
+  if (!bubble || !Array.isArray(citations) || citations.length === 0) return;
+  const text = `引用：${[...new Set(citations.map((citation) => citation.title))].join("、")}`;
+  const sibling = bubble.nextElementSibling;
+  if (sibling?.classList?.contains("message-citations")) {
+    sibling.textContent = text;
+    return;
+  }
+  const node = document.createElement("div");
+  node.className = "message-citations";
+  node.textContent = text;
+  bubble.after(node);
 }
 
 // ---------------------------------------------------------------------------
@@ -1384,6 +1401,7 @@ async function streamReply(payload, stream) {
       try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
       if (chunk.meta?.turnId) stream.turnId = chunk.meta.turnId;
       if (chunk.meta) applyTurnMeta(chunk.meta);
+      if (chunk.meta?.citations) renderCitations(stream.target, chunk.meta.citations);
       if (chunk.stage) setLiveStage(chunk.status);
       if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
       if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
@@ -1438,6 +1456,7 @@ async function followLiveTurn(conversationId, after, stream) {
       let chunk;
       try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
       if (chunk.meta) applyTurnMeta(chunk.meta);
+      if (chunk.meta?.citations) renderCitations(stream.target, chunk.meta.citations);
       if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
       if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
       if (chunk.done) {

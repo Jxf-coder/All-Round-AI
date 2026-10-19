@@ -468,6 +468,7 @@ export async function startLocalRuntime(options = {}) {
             effort: existing.effort,
             fast: existing.fast,
             engine: existing.engine,
+            citations: existing.citations ?? [],
           },
         });
         if (TERMINAL_TURN_STATUSES.includes(existing.status)) {
@@ -521,6 +522,9 @@ export async function startLocalRuntime(options = {}) {
     ]);
     const block = [buildMemoryBlock(memory), buildKnowledgeBlock(cards)].filter(Boolean).join("\n\n");
     const messages = [...(block ? [{ role: "system", content: block }] : []), ...context];
+    // Answer provenance: only cards that actually fed this turn are recorded,
+    // so the reader can audit where the reply came from.
+    const citations = cards.map((card) => ({ id: card.id, title: card.title, kind: card.kind }));
     if (messages.at(-1)?.role !== "user") {
       json(ctx.response, 400, { error: "没有可回复的消息" });
       return true;
@@ -544,6 +548,7 @@ export async function startLocalRuntime(options = {}) {
       effort,
       fast,
       engine,
+      citations,
     });
     const send = openEventStream(ctx);
     send({
@@ -556,6 +561,7 @@ export async function startLocalRuntime(options = {}) {
         model,
         effort,
         fast,
+        citations,
       },
     });
 
@@ -596,7 +602,11 @@ export async function startLocalRuntime(options = {}) {
     // stored even when the browser is already gone.
     if (answer.trim()) {
       try {
-        await conversationStore.appendMessage(ownerId, conversationId, { role: "assistant", content: answer });
+        await conversationStore.appendMessage(ownerId, conversationId, {
+          role: "assistant",
+          content: answer,
+          citations,
+        });
       } catch {
         // The conversation could have been deleted mid-stream; nothing to store.
       }

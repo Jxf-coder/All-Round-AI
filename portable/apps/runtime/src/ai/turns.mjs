@@ -81,6 +81,7 @@ export function createTurnManager(options = {}) {
       effort: turn.effort ?? null,
       fast: turn.fast === true,
       engine: turn.engine ?? null,
+      citations: turn.citations ?? [],
       seq: entry ? entry.seq : 0,
       createdAt: turn.createdAt ?? null,
       updatedAt: turn.updatedAt ?? null,
@@ -186,6 +187,7 @@ export function createTurnManager(options = {}) {
     effort = null,
     fast = false,
     engine = null,
+    citations = [],
   }) {
     // One reply at a time per conversation: sending again replaces the running
     // turn, mirroring the workbench where a new message stops the previous one.
@@ -193,6 +195,21 @@ export function createTurnManager(options = {}) {
       if (entry.turn.status === "running" && entry.turn.ownerId === ownerId
         && entry.turn.conversationId === conversationId) {
         cancel(entry.turn.id);
+      }
+    }
+    const normalizedCitations = [];
+    if (Array.isArray(citations)) {
+      const seen = new Set();
+      for (const citation of citations.slice(0, 8)) {
+        if (!citation || typeof citation.id !== "string" || !citation.id
+          || typeof citation.title !== "string" || !citation.title
+          || seen.has(citation.id)) continue;
+        seen.add(citation.id);
+        normalizedCitations.push({
+          id: citation.id,
+          title: citation.title,
+          kind: typeof citation.kind === "string" ? citation.kind : null,
+        });
       }
     }
     const timestamp = now();
@@ -208,6 +225,8 @@ export function createTurnManager(options = {}) {
       effort: effort ?? null,
       fast: fast === true,
       engine: engine ?? null,
+      // Which knowledge cards fed this answer, so the reader can audit it later.
+      citations: normalizedCitations,
       createdAt: timestamp,
       updatedAt: timestamp,
       finishedAt: null,
