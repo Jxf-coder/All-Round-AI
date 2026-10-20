@@ -17,6 +17,7 @@
     "deploy:systemd": "node portable/apps/runtime/src/deploy-cli.mjs systemd",
     "update": "node portable/apps/runtime/src/update-cli.mjs",
     "release:pack": "node portable/apps/runtime/src/update-cli.mjs pack",
+    "desk": "node portable/apps/runtime/src/desk-cli.mjs",
     "test": "node --test \"portable/packages/platform/test/*.test.mjs\" \"portable/apps/runtime/test/*.test.mjs\"",
     "test:platform": "node --test \"portable/packages/platform/test/*.test.mjs\" \"portable/apps/runtime/test/*.test.mjs\""
   }
