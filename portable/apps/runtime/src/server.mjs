@@ -27,6 +27,7 @@ import {
   parseDistillReply as parseKnowledgeDistillReply,
 } from "./distill.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
+import { createOllamaProvider } from "./ai/ollama-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
 import { TERMINAL_TURN_STATUSES, createTurnManager } from "./ai/turns.mjs";
@@ -195,9 +196,23 @@ export async function startLocalRuntime(options = {}) {
   // Engines are providers. The registry keeps the switch honest: the default
   // provider owns the installation-wide model setting, while any additional
   // engine runs on its first advertised model until it gains its own settings.
+  // Ollama is opt-in: without a URL the install stays on the mock and never
+  // waits for a local service that may not exist.
+  const ollamaUrl = options.ollamaUrl ?? env.ALLROUND_AI_OLLAMA_URL ?? env.OLLAMA_HOST;
+  let configuredProviders;
+  if (options.aiProviders) {
+    configuredProviders = options.aiProviders;
+  } else if (options.aiProvider) {
+    configuredProviders = [options.aiProvider];
+  } else {
+    configuredProviders = [createMockAiProvider()];
+    if (typeof ollamaUrl === "string" && ollamaUrl.trim()) {
+      configuredProviders.push(createOllamaProvider({ baseUrl: ollamaUrl }));
+    }
+  }
   const providerRegistry = options.providerRegistry ?? createProviderRegistry({
-    providers: options.aiProviders ?? [options.aiProvider ?? createMockAiProvider()],
-    defaultId: options.defaultEngine,
+    providers: configuredProviders,
+    defaultId: options.defaultEngine ?? env.ALLROUND_AI_ENGINE,
   });
   const defaultProvider = providerRegistry.get(providerRegistry.defaultId);
   // Settings hold the chosen model plus a provider credential, so they go
