@@ -224,3 +224,22 @@ html.dark .fast-toggle.active{background:rgba(108,132,255,.2);border-color:rgba(
 .history-list{flex:0 0 auto;padding:0 10px;overflow:visible}
 .rail-footer{flex:0 0 auto}
 .rail.collapsed .recent-heading,.rail.collapsed .history-list{display:none}
+.device-block{display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid var(--hairline);border-radius:12px;background:#ffffff8c}
+.device-block-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.device-block-head h3{margin:0;font-size:12px;font-weight:600}
+.device-list{display:flex;flex-direction:column;gap:8px}
+.device-card{display:flex;flex-direction:column;gap:6px;padding:10px 11px;border:1px solid var(--hairline);border-radius:10px;background:#ffffffb8}
+.device-card-head{display:flex;align-items:center;gap:8px}
+.device-card-head b{font-size:11px;font-weight:600}
+.device-badge{margin-left:auto;font-size:9px;padding:2px 7px;border-radius:999px;background:#eef1f6;color:#7d8a9e}
+.device-badge.online{background:#e7f8f0;color:#1d9b6c}
+.device-meta{margin:0;font-size:10px;line-height:1.6;color:#8a97a8}
+.device-ticket{margin-top:2px;padding:10px;border:1px dashed #445bee66;border-radius:9px;background:#f5f7ff;color:#2f3f57;font:11px monospace;word-break:break-all}
+.device-ticket small{display:block;margin-top:6px;font:10px Manrope,"Segoe UI",sans-serif;color:#7d8a9e}
+.device-error{margin:0;color:#d93b34;font-size:10px}
+.device-actions{display:flex;gap:8px;align-items:center}
+html.dark .device-block,html.dark .device-card{background:#16253ba6;border-color:var(--hairline)}
+html.dark .device-meta{color:#d0def87a}
+html.dark .device-ticket{background:#101d30;border-color:#8fa0ff55;color:#dce4ff}
+html.dark .device-badge{background:#ffffff14;color:#d0def8a8}
+html.dark .device-badge.online{background:#123a2b;color:#5fe0aa}

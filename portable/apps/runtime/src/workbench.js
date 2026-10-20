@@ -1085,6 +1085,10 @@ function gapForm(onDone, onCancel) {
 }
 
 let knowledgeState = null;
+// Desk devices: the list is readable by any signed-in account; tickets and
+// revocation are admin actions and surface the server's 403 in the panel.
+let deviceState = null;
+let deviceTicket = null;
 let handoverState = null;
 let intakeEditing = false;
 let intakeNotice = "";
@@ -1449,6 +1453,128 @@ async function openScoutReport(id) {
   }
 }
 
+function deviceTime(value) {
+  if (!value) return "从未上报";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+async function refreshDevices() {
+  try {
+    const response = await apiRequest("/api/devices");
+    if (!response?.ok) {
+      deviceState = { devices: [], error: "设备列表暂时不可用。" };
+    } else {
+      deviceState = await response.json();
+    }
+  } catch {
+    deviceState = { devices: [], error: "连不上运行时，稍后再试。" };
+  }
+  renderDeviceBody();
+}
+
+function deviceCard(device) {
+  const card = element("div", "device-card");
+  const head = element("div", "device-card-head");
+  head.append(element("b", null, device.name));
+  head.append(element(
+    "span",
+    `device-badge${device.online ? " online" : ""}`,
+    device.online ? "在线" : "离线",
+  ));
+  card.append(head);
+  card.append(element(
+    "p",
+    "device-meta",
+    `${device.platform || "未知平台"} · ${device.version || "未上报版本"} · 最近心跳 ${deviceTime(device.lastSeenAt)}`,
+  ));
+  const capabilities = Array.isArray(device.capabilities) && device.capabilities.length
+    ? device.capabilities.join("、")
+    : "未声明能力";
+  card.append(element("p", "device-meta", `能力：${capabilities} · 配对于 ${deviceTime(device.pairedAt)}`));
+  const actions = element("div", "device-actions");
+  const remove = actionButton("移除", async () => {
+    remove.disabled = true;
+    try {
+      const response = await apiRequest(`/api/devices/${encodeURIComponent(device.id)}`, { method: "DELETE" });
+      if (!response?.ok) {
+        const body = await response?.json().catch(() => null);
+        deviceState = { ...(deviceState ?? { devices: [] }), error: body?.error || "移除失败。" };
+        renderDeviceBody();
+        return;
+      }
+      await refreshDevices();
+    } catch {
+      deviceState = { ...(deviceState ?? { devices: [] }), error: "移除失败，稍后再试。" };
+      renderDeviceBody();
+    } finally {
+      remove.disabled = false;
+    }
+  });
+  actions.append(remove);
+  card.append(actions);
+  return card;
+}
+
+function renderDeviceBody() {
+  panelBody.replaceChildren();
+
+  const pairBlock = element("section", "device-block");
+  const pairHead = element("div", "device-block-head");
+  pairHead.append(element("h3", null, "配对票据"));
+  const issue = actionButton("生成配对票据", async () => {
+    issue.disabled = true;
+    try {
+      const response = await apiRequest("/api/devices/tickets", { method: "POST", body: "{}" });
+      const body = await response?.json().catch(() => null);
+      deviceTicket = response?.ok ? body : { error: body?.error || "生成失败。" };
+      renderDeviceBody();
+    } catch {
+      deviceTicket = { error: "生成失败，稍后再试。" };
+      renderDeviceBody();
+    } finally {
+      issue.disabled = false;
+    }
+  });
+  issue.classList.add("primary-button");
+  pairHead.append(issue);
+  pairBlock.append(pairHead);
+  pairBlock.append(element(
+    "p",
+    "panel-note",
+    "在 desk 设备上执行 npm run desk -- pair --server <本地址> --ticket <票据> --name <设备名>。票据十分钟内有效，且只能使用一次。",
+  ));
+  if (deviceTicket?.ticket) {
+    const box = element("div", "device-ticket");
+    box.textContent = deviceTicket.ticket;
+    box.append(element("small", null, `有效期至 ${deviceTime(deviceTicket.expiresAt)}`));
+    pairBlock.append(box);
+  } else if (deviceTicket?.error) {
+    pairBlock.append(element("p", "device-error", deviceTicket.error));
+  }
+  panelBody.append(pairBlock);
+
+  const listBlock = element("section", "device-block");
+  const listHead = element("div", "device-block-head");
+  listHead.append(element("h3", null, "已配对设备"));
+  listHead.append(actionButton("刷新", () => void refreshDevices()));
+  listBlock.append(listHead);
+
+  if (deviceState?.error) listBlock.append(element("p", "device-error", deviceState.error));
+  const list = element("div", "device-list");
+  const devices = deviceState?.devices ?? [];
+  if (!deviceState) {
+    list.append(element("p", "knowledge-empty", "正在读取设备…"));
+  } else if (!devices.length) {
+    list.append(element("p", "knowledge-empty", "还没有配对设备。生成票据后，在 desk 上执行 pair 命令。"));
+  }
+  for (const device of devices) list.append(deviceCard(device));
+  listBlock.append(list);
+  panelBody.append(listBlock);
+}
+
 function renderKnowledgeBody() {
   panelBody.replaceChildren();
   if (!knowledgeState) {
@@ -1757,6 +1883,14 @@ function showPanelView(panel, label) {
   composer.hidden = true;
   welcome.classList.add("hidden");
   panelTitle.textContent = label;
+  if (panel === "devices") {
+    panelCopy.textContent = "把本机 desk 代理配对到工作台。工作台只保存令牌哈希，令牌本身留在设备上。";
+    deviceState = null;
+    deviceTicket = null;
+    renderDeviceBody();
+    void refreshDevices();
+    return;
+  }
   if (panel === "database") {
     panelCopy.textContent = '只把"已确认"的知识卡喂给模型：每次提问按关键词匹配，最多带上 3 张。';
     knowledgeState = null;
