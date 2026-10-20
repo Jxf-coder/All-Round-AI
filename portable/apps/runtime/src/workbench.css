@@ -161,6 +161,17 @@ html.dark .memory-pending-item{background:#0f1a2c}
 textarea.knowledge-field{min-height:64px;resize:vertical}
 .knowledge-form-actions{display:flex;gap:6px}
 .regression-block{margin-top:12px}
+.intake-block{margin-bottom:12px}
+.intake-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.intake-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.intake-field.wide,.intake-check,.intake-grid .wide{grid-column:1/-1}
+.intake-label{color:var(--muted);font-size:10px}
+.intake-field textarea{min-height:64px;resize:vertical}
+.intake-check{display:flex;align-items:center;gap:6px;color:var(--ink);font-size:11px}
+.intake-readonly{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px}
+.intake-item{display:flex;flex-direction:column;gap:2px;min-width:0}
+.intake-value{color:var(--ink);font-size:11px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
+.intake-notice{margin:0;color:#1e9e6a;font-size:10px}
 .regression-row{display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--hairline)}
 .regression-row:last-child{border-bottom:0}
 .regression-question{flex:1;min-width:0;color:var(--ink);font-size:11px;line-height:1.6}

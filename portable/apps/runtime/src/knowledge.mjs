@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { createJsonFileStore } from "../../../packages/platform/src/storage.mjs";
+import { buildIntakeCards, cleanIntake, parseQuestions } from "./intake.mjs";
 
 // ---------------------------------------------------------------------------
 // Per-project knowledge: 知识卡 (knowledge cards) and 缺口清单 (open gaps).
@@ -27,6 +28,9 @@ const STATUS_SET = new Set(CARD_STATUSES);
 const MAX_CARDS = 500;
 const MAX_GAPS = 200;
 const MAX_REGRESSION_QUESTION = 200;
+const INTAKE_TEXT_KEYS = Object.freeze(
+  Object.keys(cleanIntake({})).filter((key) => key !== "bossConfirmed"),
+);
 
 function isIsoTimestamp(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
@@ -44,7 +48,7 @@ function validateRegression(regression) {
     if (!question || typeof question !== "object"
       || typeof question.id !== "string" || !question.id
       || typeof question.q !== "string" || !question.q
-      || question.from !== "manual"
+      || (question.from !== "manual" && question.from !== "intake")
       || !isIsoTimestamp(question.addedAt)
       || (question.baseline !== undefined
         && (!Array.isArray(question.baseline)
@@ -68,6 +72,25 @@ function validateRegression(regression) {
         && typeof item.pass === "boolean"
         && (item.retained === null || typeof item.retained === "number"))) {
       throw new Error("All Round AI knowledge store contains an invalid regression run");
+    }
+  }
+}
+
+// Intake arrived after the base document too. It is optional, but once present
+// it must be complete: a half-written record would make the form show blanks as
+// if the company had answered them.
+function validateIntake(intake) {
+  if (intake === undefined || intake === null) return;
+  if (typeof intake !== "object" || Array.isArray(intake)
+    || !isIsoTimestamp(intake.at)
+    || typeof intake.by !== "string"
+    || !intake.fields || typeof intake.fields !== "object" || Array.isArray(intake.fields)
+    || typeof intake.fields.bossConfirmed !== "boolean") {
+    throw new Error("All Round AI knowledge store contains an invalid intake record");
+  }
+  for (const key of INTAKE_TEXT_KEYS) {
+    if (typeof intake.fields[key] !== "string") {
+      throw new Error("All Round AI knowledge store contains an invalid intake record");
     }
   }
 }
@@ -106,6 +129,7 @@ function validateDocument(value) {
       }
     }
     validateRegression(project.regression);
+    validateIntake(project.intake);
   }
   return value;
 }
@@ -135,6 +159,14 @@ function cloneCard(card) {
     source: card.source ?? null,
     createdAt: card.createdAt,
     updatedAt: card.updatedAt,
+  };
+}
+
+function cloneIntake(intake) {
+  return {
+    at: intake.at,
+    by: intake.by,
+    fields: { ...intake.fields },
   };
 }
 
@@ -253,6 +285,7 @@ export async function createKnowledgeStore(filePath) {
       projectId: project.projectId,
       cards: [...cards].sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
       gaps: [...gaps].sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
+      intake: project.intake ? cloneIntake(project.intake) : null,
       regression: { questions, runs },
       stats: {
         cards: cards.length,
@@ -282,6 +315,72 @@ export async function createKnowledgeStore(filePath) {
       const { projects } = await store.read();
       const project = projects.find((item) => item.projectId === projectId);
       return summarize(project ?? { projectId, cards: [], gaps: [] });
+    },
+    // Submitting the intake answers updates one record, four standard cards and
+    // the questions that came from the form. Manual regression questions are
+    // left alone; intake questions keep their id and baseline when the wording
+    // did not change, so retention history survives an edit elsewhere.
+    async setIntake(projectId, rawFields, by) {
+      requireProject(projectId);
+      if (rawFields !== undefined && rawFields !== null
+        && (typeof rawFields !== "object" || Array.isArray(rawFields))) {
+        throw new TypeError("开工前问答格式错误");
+      }
+      const fields = cleanIntake(rawFields ?? {});
+      const at = new Date().toISOString();
+      const author = typeof by === "string" ? by.trim().slice(0, 100) : "";
+      const status = fields.bossConfirmed ? "confirmed" : "pending";
+      const cards = buildIntakeCards(fields, { status });
+      const questions = parseQuestions(fields.questions);
+      return store.update((document) => {
+        const project = projectOf(document, projectId);
+        const record = { at, by: author, fields };
+        project.intake = record;
+        for (const card of cards) {
+          const existing = project.cards.find((item) => item.id === card.id);
+          if (existing) {
+            existing.kind = card.kind;
+            existing.title = card.title.slice(0, MAX_CARD_TITLE);
+            existing.body = card.body.slice(0, MAX_CARD_BODY);
+            existing.status = card.status;
+            existing.source = card.source;
+            existing.updatedAt = at;
+            continue;
+          }
+          if (project.cards.length >= MAX_CARDS) {
+            throw new Error("知识卡数量已达上限，请先清理旧卡片");
+          }
+          project.cards.push({
+            id: card.id,
+            kind: card.kind,
+            title: card.title.slice(0, MAX_CARD_TITLE),
+            body: card.body.slice(0, MAX_CARD_BODY),
+            status: card.status,
+            source: card.source,
+            createdAt: at,
+            updatedAt: at,
+          });
+        }
+        const manual = project.regression.questions.filter((item) => item.from === "manual");
+        const previous = new Map(
+          project.regression.questions
+            .filter((item) => item.from === "intake")
+            .map((item) => [item.q, item]),
+        );
+        const fromIntake = questions.map((question) => previous.get(question) ?? {
+          id: randomUUID(),
+          q: question,
+          from: "intake",
+          addedAt: at,
+        });
+        const merged = [...manual, ...fromIntake].slice(0, MAX_REGRESSION_QUESTIONS);
+        project.regression.questions = merged;
+        return {
+          record: cloneIntake(record),
+          cards: cards.map((card) => card.id),
+          questions: merged.filter((item) => item.from === "intake").length,
+        };
+      });
     },
     async addCard(projectId, { kind, title, body, source } = {}) {
       requireProject(projectId);

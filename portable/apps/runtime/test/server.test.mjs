@@ -77,6 +77,9 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(scriptSource, /knowledgeAction/);
     assert.match(scriptSource, /regressionRun/);
     assert.match(scriptSource, /runKnowledgeRegression/);
+    assert.match(scriptSource, /renderIntakeBlock/);
+    assert.match(scriptSource, /action: "intake"/);
+    assert.match(styleSource, /\.intake-grid\{/);
     assert.match(scriptSource, /exportHandover/);
     assert.match(scriptSource, /\/api\/handover/);
     assert.match(styleSource, /\.handover-row\{/);

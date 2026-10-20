@@ -951,7 +951,8 @@ export async function startLocalRuntime(options = {}) {
   });
 
   router.post("/api/knowledge", async (ctx) => {
-    if (!(await requireActor(ctx))) return true;
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
     let body;
     try {
       body = await readOptionalJsonBody(ctx, { maxBytes: 64 * 1024 });
@@ -968,6 +969,9 @@ export async function startLocalRuntime(options = {}) {
     try {
       let missing = null;
       switch (body.action) {
+        case "intake":
+          await knowledgeStore.setIntake(projectId, body.fields, actor.name);
+          break;
         case "card":
           await knowledgeStore.addCard(projectId, body);
           break;

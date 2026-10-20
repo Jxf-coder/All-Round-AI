@@ -1086,6 +1086,29 @@ function gapForm(onDone, onCancel) {
 
 let knowledgeState = null;
 let handoverState = null;
+let intakeEditing = false;
+let intakeNotice = "";
+
+// Same order and short labels as the reference knowledge panel:范围与边界在前，
+// 营销 Plan 的细节在后。`wide` fields also span both columns.
+const INTAKE_FIELDS = [
+  ["product", "主打产品"],
+  ["customer", "主要客户"],
+  ["platform", "主要平台"],
+  ["materialsWhere", "资料在哪", true],
+  ["nas", "NAS 型号"],
+  ["devOs", "执行电脑系统"],
+  ["forbidden", "禁入内容", true, true],
+  ["externalOk", "可对外的内容", true],
+  ["redLines", "红线", true, true],
+  ["questions", "客户最常问的 10 个问题", true, true],
+  ["versioning", "版本怎么管"],
+  ["hours", "每周能投入"],
+  ["positioning", "一句话定位"],
+  ["sellingPoints", "核心卖点与证明", true],
+  ["contentThemes", "选题方向", true],
+  ["knowledgeNeeds", "知识库必须有的事实", true],
+];
 
 async function knowledgeAction(payload) {
   const response = await apiRequest("/api/knowledge", {
@@ -1099,6 +1122,108 @@ async function knowledgeAction(payload) {
   return null;
 }
 
+function renderIntakeBlock() {
+  const block = element("section", "knowledge-block intake-block");
+  const head = element("div", "knowledge-block-head");
+  head.append(element("h3", null, "开工前问答"));
+  const intake = knowledgeState?.intake ?? null;
+  if (!intakeEditing) {
+    const toggle = element("button", "quiet-button", intake ? "修改" : "现在填写");
+    toggle.type = "button";
+    toggle.addEventListener("click", () => {
+      intakeEditing = true;
+      intakeNotice = "";
+      renderKnowledgeBody();
+    });
+    head.append(toggle);
+  }
+  const body = element("div", "knowledge-list");
+  if (intakeEditing) {
+    body.append(intakeForm(intake?.fields ?? {}));
+  } else if (intake) {
+    const grid = element("div", "intake-readonly");
+    for (const [key, label] of INTAKE_FIELDS) {
+      const item = element("div", "intake-item");
+      item.append(element("span", "intake-label", label));
+      item.append(element("span", "intake-value", intake.fields[key] || "—"));
+      grid.append(item);
+    }
+    const confirmed = element("div", "intake-item");
+    confirmed.append(element("span", "intake-label", "老板已确认"));
+    confirmed.append(element("span", "intake-value", intake.fields.bossConfirmed ? "是" : "否"));
+    grid.append(confirmed);
+    body.append(grid);
+    body.append(element("p", "panel-note",
+      `填写于 ${new Date(intake.at).toLocaleString()}`
+      + (intake.by ? ` · ${intake.by}` : "")
+      + "；保存后自动更新 4 张标准卡，客户常问问题并入回归题。"));
+  } else {
+    body.append(element("p", "knowledge-empty",
+      "先用 16 个问题定下知识库的范围、禁入、红线和沉淀标准。保存后自动生成 4 张标准卡，客户常问的问题进回归题。"));
+  }
+  if (intakeNotice) body.append(element("p", "intake-notice", intakeNotice));
+  block.append(head, body);
+  return block;
+}
+
+function intakeForm(fields) {
+  const form = element("form", "intake-grid");
+  for (const [key, label, multiline, wide] of INTAKE_FIELDS) {
+    const wrap = element("label", `intake-field${wide ? " wide" : ""}`);
+    wrap.append(element("span", "intake-label", label));
+    const input = document.createElement(multiline ? "textarea" : "input");
+    input.className = "knowledge-field";
+    input.name = key;
+    input.value = fields[key] ?? "";
+    if (key === "questions") input.placeholder = "一行一个，10 个左右";
+    wrap.append(input);
+    form.append(wrap);
+  }
+  const check = element("label", "intake-check");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.name = "bossConfirmed";
+  box.checked = fields.bossConfirmed === true;
+  check.append(box, document.createTextNode("老板已确认（勾选后四张标准卡直接记为已确认）"));
+  form.append(check);
+
+  const error = element("p", "knowledge-error wide");
+  error.hidden = true;
+  const actions = element("div", "knowledge-form-actions wide");
+  const submit = element("button", "primary-button", "保存");
+  submit.type = "submit";
+  const cancel = element("button", "quiet-button", "取消");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => {
+    intakeEditing = false;
+    intakeNotice = "";
+    renderKnowledgeBody();
+  });
+  actions.append(submit, cancel);
+  form.append(actions, error);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = {};
+    for (const [key] of INTAKE_FIELDS) {
+      values[key] = form.elements.namedItem(key)?.value ?? "";
+    }
+    values.bossConfirmed = form.elements.namedItem("bossConfirmed")?.checked === true;
+    submit.disabled = true;
+    const failure = await knowledgeAction({ action: "intake", fields: values });
+    if (failure) {
+      submit.disabled = false;
+      error.hidden = false;
+      error.textContent = failure;
+      return;
+    }
+    intakeEditing = false;
+    intakeNotice = "开工前问答已保存，四张标准卡与回归题已更新。";
+    await refreshKnowledge();
+  });
+  return form;
+}
+
 function renderKnowledgeBody() {
   panelBody.replaceChildren();
   if (!knowledgeState) {
@@ -1106,6 +1231,7 @@ function renderKnowledgeBody() {
     return;
   }
   panelBody.append(knowledgeStats(knowledgeState.stats));
+  panelBody.append(renderIntakeBlock());
 
   const columns = element("div", "knowledge-columns");
 
@@ -1235,7 +1361,7 @@ function renderKnowledgeBody() {
   panelBody.append(handoverBlock);
 
   panelBody.append(element("p", "panel-note",
-    "回归题会在每次升级后重放本地检索；来源条目索引与开工前问答尚未迁移。"));
+    "回归题会在每次升级后重放本地检索；来源条目索引与巡读 scout 尚未迁移。"));
 }
 
 async function exportHandover(statusNode) {
@@ -1308,6 +1434,7 @@ function regressionForm(onDone, onCancel) {
 }
 
 async function refreshKnowledge() {
+  intakeEditing = false;
   let response;
   try {
     response = await apiRequest(`/api/knowledge?projectId=${encodeURIComponent(currentProjectId ?? "")}`);
