@@ -17,3 +17,5 @@ vault/
 *.log
 .DS_Store
 Thumbs.db
+# 阶段验收档案只保留在本地，不推送到远端
+/docs/portability/
