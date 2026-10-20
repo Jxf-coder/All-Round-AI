@@ -14,6 +14,7 @@
     "backup": "node portable/apps/runtime/src/backup-cli.mjs create",
     "backup:verify": "node portable/apps/runtime/src/backup-cli.mjs verify",
     "backup:restore": "node portable/apps/runtime/src/backup-cli.mjs restore",
+    "deploy:systemd": "node portable/apps/runtime/src/deploy-cli.mjs systemd",
     "test": "node --test \"portable/packages/platform/test/*.test.mjs\" \"portable/apps/runtime/test/*.test.mjs\"",
     "test:platform": "node --test \"portable/packages/platform/test/*.test.mjs\" \"portable/apps/runtime/test/*.test.mjs\""
   }
