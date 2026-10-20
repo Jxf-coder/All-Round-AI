@@ -172,6 +172,19 @@ textarea.knowledge-field{min-height:64px;resize:vertical}
 .intake-item{display:flex;flex-direction:column;gap:2px;min-width:0}
 .intake-value{color:var(--ink);font-size:11px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
 .intake-notice{margin:0;color:#1e9e6a;font-size:10px}
+.sources-block,.scout-block{margin-bottom:12px}
+.source-roots{min-height:70px;resize:vertical}
+.scout-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:10px;border:1px dashed var(--hairline);border-radius:10px;background:#ffffff8c}
+.scout-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.scout-field.wide{grid-column:1/-1}
+.scout-runs{margin-top:8px}
+.scout-run{display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--hairline)}
+.scout-run:last-child{border-bottom:0}
+.scout-title{flex:none;max-width:30%;overflow:hidden;color:var(--ink);font-size:11px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.scout-meta{flex:1;min-width:0;overflow:hidden;color:var(--muted);font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+.scout-report-box{margin:6px 0 8px;padding:6px 8px;border:1px solid var(--hairline);border-radius:8px}
+.scout-report-box summary{cursor:pointer;color:var(--muted);font-size:10px}
+.scout-report{max-height:220px;margin:6px 0 0;overflow:auto;color:var(--ink);font-family:inherit;font-size:10px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
 .regression-row{display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--hairline)}
 .regression-row:last-child{border-bottom:0}
 .regression-question{flex:1;min-width:0;color:var(--ink);font-size:11px;line-height:1.6}
@@ -190,6 +203,7 @@ html.dark .knowledge-card-body{color:#e8effcb8}
 html.dark .knowledge-kind{background:rgba(255,255,255,.08);color:#d0def87a}
 html.dark .knowledge-action{color:#d0def87a;border-color:rgba(255,255,255,.1)}
 html.dark .knowledge-field{background:#0f1a2c;color:var(--ink);border-color:rgba(255,255,255,.1)}
+html.dark .scout-form{background:#16253ba6;border-color:var(--hairline)}
 @media(max-width:900px){.knowledge-columns{grid-template-columns:1fr}.knowledge-stats{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:640px){.panel-view{top:56px;width:calc(100% - 25px)}}
 .fast-toggle.active{background:rgba(37,67,255,.12);border-color:rgba(37,67,255,.34);color:#1f37d6;font-weight:600}

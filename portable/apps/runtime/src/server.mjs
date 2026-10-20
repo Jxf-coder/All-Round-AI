@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { ensureAppDirectories } from "../../../packages/platform/src/directories.mjs";
@@ -17,6 +17,9 @@ import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
 import { buildKnowledgeBlock, createKnowledgeStore } from "./knowledge.mjs";
 import { createHandover, latestHandover, readHandover } from "./handover.mjs";
+import { forbiddenTerms } from "./intake.mjs";
+import { createSourceStore, resolveScoutRoot } from "./sources.mjs";
+import { createScoutStore } from "./scout.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
@@ -144,6 +147,9 @@ export async function startLocalRuntime(options = {}) {
     allowRemote: options.allowRemote ?? env.ALLROUND_AI_ALLOW_REMOTE,
   });
   const directories = await ensureAppDirectories(options);
+  // The default source root is a plain folder users can drop files into; it is
+  // created up front so the first scout run does not fail on a missing path.
+  await mkdir(path.join(directories.data, "imports"), { recursive: true });
   const logger = createAppLogger(path.join(directories.logs, "runtime.jsonl"));
   // Migrations run before any store opens a document: the stores are
   // fail-closed, so reading an older shape first would make the instance
@@ -204,6 +210,14 @@ export async function startLocalRuntime(options = {}) {
     ?? await createMemoryStore(path.join(directories.config, "memory.json"));
   const knowledgeStore = options.knowledgeStore
     ?? await createKnowledgeStore(path.join(directories.config, "knowledge.json"));
+  // Source roots and scout runs are installation-wide: a mounted share is the
+  // same share for every project, and scout history is not project knowledge.
+  const sourceStore = options.sourceStore
+    ?? await createSourceStore(path.join(directories.config, "sources.json"), {
+      defaultRoots: [path.join(directories.data, "imports")],
+    });
+  const scoutStore = options.scoutStore
+    ?? await createScoutStore(path.join(directories.config, "scout.json"));
   // Handover bundles are exports, not live state, so they live beside config
   // rather than inside it. The directory is created on first export.
   const handoverDirectory = options.handoverDirectory ?? path.join(directories.data, "handover");
@@ -939,14 +953,36 @@ export async function startLocalRuntime(options = {}) {
   // POST for every mutation; that shape is kept here, but each response carries
   // the refreshed state so the UI does not need a follow-up read.
   router.get("/api/knowledge", async (ctx) => {
-    if (!(await requireActor(ctx))) return true;
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
     const defaultProjectId = await projectStore.defaultRootId();
     const requested = ctx.url.searchParams.get("projectId");
     if (requested && !(await projectStore.get(requested))) {
       json(ctx.response, 404, { error: "项目不存在" });
       return true;
     }
-    json(ctx.response, 200, await knowledgeStore.list(requested || defaultProjectId));
+    const projectId = requested || defaultProjectId;
+    // A single run is fetched by id for its report; the list stays small.
+    const scoutId = ctx.url.searchParams.get("scout");
+    if (scoutId) {
+      const run = await scoutStore.get(projectId, scoutId);
+      if (!run) {
+        json(ctx.response, 404, { error: "没有这次巡读" });
+        return true;
+      }
+      json(ctx.response, 200, { run });
+      return true;
+    }
+    const [knowledge, sources, scouts] = await Promise.all([
+      knowledgeStore.list(projectId),
+      sourceStore.list(),
+      scoutStore.list(projectId),
+    ]);
+    json(ctx.response, 200, {
+      ...knowledge,
+      sources: { ...sources, canEdit: actor.role === "admin" },
+      scouts,
+    });
     return true;
   });
 
@@ -1004,6 +1040,27 @@ export async function startLocalRuntime(options = {}) {
           }
           break;
         }
+        case "sourcesSave":
+          if (actor.role !== "admin") {
+            json(ctx.response, 403, { error: "只有管理员可以修改来源目录" });
+            return true;
+          }
+          await sourceStore.save(body.roots, actor.name);
+          break;
+        case "scoutRun": {
+          const sourceState = await sourceStore.list();
+          const root = await resolveScoutRoot(body.root, sourceState.roots);
+          const intake = (await knowledgeStore.list(projectId)).intake;
+          const run = await scoutStore.run({
+            projectId,
+            root,
+            goal: body.goal,
+            label: body.label,
+            forbidden: forbiddenTerms(intake?.fields ?? null),
+          });
+          json(ctx.response, 200, { action: body.action, run, report: run.report });
+          return true;
+        }
         default:
           json(ctx.response, 400, { error: "未知的 action" });
           return true;
@@ -1012,7 +1069,17 @@ export async function startLocalRuntime(options = {}) {
         json(ctx.response, 404, { error: missing });
         return true;
       }
-      json(ctx.response, 200, { action: body.action, ...(await knowledgeStore.list(projectId)) });
+      const [knowledge, sources, scouts] = await Promise.all([
+        knowledgeStore.list(projectId),
+        sourceStore.list(),
+        scoutStore.list(projectId),
+      ]);
+      json(ctx.response, 200, {
+        action: body.action,
+        ...knowledge,
+        sources: { ...sources, canEdit: actor.role === "admin" },
+        scouts,
+      });
     } catch (error) {
       json(ctx.response, 400, { error: error.message || "知识库操作失败" });
     }

@@ -1088,6 +1088,9 @@ let knowledgeState = null;
 let handoverState = null;
 let intakeEditing = false;
 let intakeNotice = "";
+// The report of one scout run, kept outside knowledgeState because the list
+// endpoint deliberately returns summaries only.
+let scoutReport = null;
 
 // Same order and short labels as the reference knowledge panel:范围与边界在前，
 // 营销 Plan 的细节在后。`wide` fields also span both columns.
@@ -1224,6 +1227,182 @@ function intakeForm(fields) {
   return form;
 }
 
+function renderSourcesBlock() {
+  const sources = knowledgeState?.sources ?? { roots: [], canEdit: false };
+  const block = element("section", "knowledge-block sources-block");
+  const head = element("div", "knowledge-block-head");
+  head.append(element("h3", null, "来源配置"));
+  const status = element("p", "knowledge-error");
+  status.hidden = true;
+  const area = document.createElement("textarea");
+  area.className = "knowledge-field source-roots";
+  area.value = sources.roots.join("\n");
+  area.placeholder = "一行一个绝对路径，例如：\n/mnt/nas/产品资料\nD:\\资料\\产品";
+  area.setAttribute("aria-label", "可巡读目录");
+  area.disabled = sources.canEdit !== true;
+  if (sources.canEdit) {
+    const save = element("button", "primary-button", "保存来源");
+    save.type = "button";
+    save.addEventListener("click", () => void saveSources(area, status));
+    head.append(save);
+  }
+  const body = element("div", "knowledge-list");
+  body.append(area);
+  body.append(element("p", "panel-note", sources.canEdit
+    ? "一行一个绝对路径；巡读只能读这些目录之内，不会修改源文件。"
+    : "只有管理员可以修改来源目录。"));
+  if (sources.updatedAt) {
+    body.append(element("p", "panel-note",
+      `上次修改 ${new Date(sources.updatedAt).toLocaleString()}`
+      + (sources.updatedBy ? ` · ${sources.updatedBy}` : "")));
+  }
+  block.append(head, status, body);
+  return block;
+}
+
+async function saveSources(area, statusNode) {
+  statusNode.hidden = true;
+  const roots = area.value.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  try {
+    const response = await apiRequest("/api/knowledge", {
+      method: "POST",
+      body: JSON.stringify({ action: "sourcesSave", projectId: currentProjectId, roots }),
+    });
+    if (!response) return;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      statusNode.hidden = false;
+      statusNode.textContent = body.error || "保存失败";
+      return;
+    }
+    knowledgeState = body;
+    renderKnowledgeBody();
+  } catch {
+    statusNode.hidden = false;
+    statusNode.textContent = "保存失败，请稍后重试";
+  }
+}
+
+function scoutField(label, control, wide = false) {
+  const wrap = element("label", `scout-field${wide ? " wide" : ""}`);
+  wrap.append(element("span", "intake-label", label), control);
+  return wrap;
+}
+
+function renderScoutBlock() {
+  const sources = knowledgeState?.sources ?? { roots: [] };
+  const scouts = knowledgeState?.scouts ?? [];
+  const block = element("section", "knowledge-block scout-block");
+  const head = element("div", "knowledge-block-head");
+  head.append(element("h3", null, "巡读"));
+  head.append(element("span", "panel-note", "只读扫描 · 规则筛选"));
+
+  const form = element("form", "scout-form");
+  const rootInput = document.createElement("input");
+  rootInput.className = "knowledge-field";
+  rootInput.name = "scout-root";
+  rootInput.value = sources.roots[0] ?? "";
+  rootInput.placeholder = "绝对路径，例如 /mnt/nas/产品资料";
+  const goalInput = document.createElement("input");
+  goalInput.className = "knowledge-field";
+  goalInput.name = "scout-goal";
+  goalInput.placeholder = "这次要找什么，例如：产品参数、客户常问问题；合同、工资不要";
+  const labelInput = document.createElement("input");
+  labelInput.className = "knowledge-field";
+  labelInput.name = "scout-label";
+  labelInput.placeholder = "标签，如 产品资料";
+  const submit = element("button", "primary-button", "开始巡读");
+  submit.type = "submit";
+  const status = element("p", "knowledge-error wide");
+  status.hidden = true;
+  const actions = element("div", "knowledge-form-actions wide");
+  actions.append(submit);
+  form.append(
+    scoutField("目录（来源配置里的白名单）", rootInput, true),
+    scoutField("目标", goalInput, true),
+    scoutField("标签", labelInput),
+    actions,
+    status,
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    status.hidden = true;
+    submit.disabled = true;
+    try {
+      const response = await apiRequest("/api/knowledge", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "scoutRun",
+          projectId: currentProjectId,
+          root: rootInput.value,
+          goal: goalInput.value,
+          label: labelInput.value,
+        }),
+      });
+      if (!response) return;
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        submit.disabled = false;
+        status.hidden = false;
+        status.textContent = body.error || "巡读失败";
+        return;
+      }
+      scoutReport = { id: body.run.id, text: body.report };
+      await refreshKnowledge();
+    } catch {
+      submit.disabled = false;
+      status.hidden = false;
+      status.textContent = "巡读失败，请稍后重试";
+    }
+  });
+
+  const list = element("div", "knowledge-list scout-runs");
+  if (!scouts.length) {
+    list.append(element("p", "knowledge-empty", "还没有巡读记录。配置来源目录后，从上面发起一次只读扫描。"));
+  }
+  for (const run of scouts.slice(0, 5)) {
+    const row = element("div", "scout-run");
+    row.append(element("span", "scout-title", run.label));
+    row.append(element("span", "scout-meta",
+      `${new Date(run.createdAt).toLocaleString()} · 扫 ${run.counts.files} · 留 ${run.counts.keep} · 筛 ${run.counts.rule}`));
+    const open = actionButton(scoutReport?.id === run.id ? "收起报告" : "报告",
+      () => void openScoutReport(run.id));
+    row.append(open);
+    list.append(row);
+    if (scoutReport?.id === run.id) {
+      const details = document.createElement("details");
+      details.className = "scout-report-box";
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = "巡读报告";
+      const pre = element("pre", "scout-report", scoutReport.text);
+      details.append(summary, pre);
+      list.append(details);
+    }
+  }
+  block.append(head, form, list);
+  return block;
+}
+
+async function openScoutReport(id) {
+  if (scoutReport?.id === id) {
+    scoutReport = null;
+    renderKnowledgeBody();
+    return;
+  }
+  try {
+    const response = await apiRequest(
+      `/api/knowledge?projectId=${encodeURIComponent(currentProjectId ?? "")}&scout=${encodeURIComponent(id)}`,
+    );
+    if (!response?.ok) return;
+    const body = await response.json();
+    scoutReport = { id, text: body.run?.report ?? "" };
+    renderKnowledgeBody();
+  } catch {
+    /* the run list already explains failures; a report read is best-effort */
+  }
+}
+
 function renderKnowledgeBody() {
   panelBody.replaceChildren();
   if (!knowledgeState) {
@@ -1232,6 +1411,8 @@ function renderKnowledgeBody() {
   }
   panelBody.append(knowledgeStats(knowledgeState.stats));
   panelBody.append(renderIntakeBlock());
+  panelBody.append(renderSourcesBlock());
+  panelBody.append(renderScoutBlock());
 
   const columns = element("div", "knowledge-columns");
 
@@ -1361,7 +1542,7 @@ function renderKnowledgeBody() {
   panelBody.append(handoverBlock);
 
   panelBody.append(element("p", "panel-note",
-    "回归题会在每次升级后重放本地检索；来源条目索引与巡读 scout 尚未迁移。"));
+    "回归题会在每次升级后重放本地检索；AI 提炼、条目索引与交接包导入尚未迁移。"));
 }
 
 async function exportHandover(statusNode) {
