@@ -21,6 +21,7 @@ import {
   checkHealth,
   compareVersions,
   installRelease,
+  packRelease,
   parseVersion,
   releaseStatus,
   rollbackRelease,
@@ -246,6 +247,68 @@ test("activate rejects unknown versions and rollback without a previous version"
   }
 });
 
+test("pack builds a release package from a source tree", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "allround-pack-"));
+  try {
+    const source = path.join(root, "source");
+    await mkdir(path.join(source, "portable", "apps", "runtime", "src"), { recursive: true });
+    await mkdir(path.join(source, ".git"), { recursive: true });
+    await mkdir(path.join(source, "node_modules", "dep"), { recursive: true });
+    await mkdir(path.join(source, "reference"), { recursive: true });
+    await mkdir(path.join(source, "logs"), { recursive: true });
+    await writeFile(path.join(source, "package.json"), "{\"name\":\"all-round-ai\",\"version\":\"0.3.0\"}\n");
+    await writeFile(path.join(source, "README.md"), "release notes\n");
+    await writeFile(path.join(source, "portable", "apps", "runtime", "src", "main.mjs"), "console.log('hi');\n");
+    await writeFile(path.join(source, ".git", "config"), "[core]\n");
+    await writeFile(path.join(source, "node_modules", "dep", "index.js"), "module.exports = {};\n");
+    await writeFile(path.join(source, "reference", "old.txt"), "baseline copy\n");
+    await writeFile(path.join(source, "logs", "runtime.jsonl"), "{}\n");
+
+    const packed = await packRelease({ sourceDir: source, outDir: path.join(root, "out"), now: fixedNow });
+    assert.equal(packed.version, "0.3.0");
+    assert.equal(path.basename(packed.directory), "all-round-ai-0.3.0");
+    assert.equal((await verifyReleasePackage(packed.directory)).ok, true);
+
+    const manifest = JSON.parse(await readFile(path.join(packed.directory, "release.json"), "utf8"));
+    assert.deepEqual(
+      manifest.files.map((file) => file.path).sort(),
+      ["README.md", "package.json", "portable/apps/runtime/src/main.mjs"],
+    );
+    assert.equal(manifest.totalBytes, manifest.files.reduce((total, file) => total + file.size, 0));
+    assert.equal(
+      await readFile(path.join(packed.directory, "portable", "apps", "runtime", "src", "main.mjs"), "utf8"),
+      "console.log('hi');\n",
+    );
+    await assert.rejects(readFile(path.join(packed.directory, ".git", "config")), /ENOENT/u);
+    await assert.rejects(readFile(path.join(packed.directory, "node_modules", "dep", "index.js")), /ENOENT/u);
+    await assert.rejects(readFile(path.join(packed.directory, "reference", "old.txt")), /ENOENT/u);
+    await assert.rejects(readFile(path.join(packed.directory, "logs", "runtime.jsonl")), /ENOENT/u);
+
+    await assert.rejects(
+      packRelease({ sourceDir: source, outDir: path.join(root, "out") }),
+      /发布包已存在/u,
+    );
+    await assert.rejects(
+      packRelease({ sourceDir: source, outDir: path.join(source, "dist") }),
+      /不能位于源码目录内/u,
+    );
+    await assert.rejects(
+      packRelease({ sourceDir: source, outDir: path.join(root, "other"), version: "0.4.0" }),
+      /版本号与 package\.json 不一致/u,
+    );
+
+    const incomplete = path.join(root, "incomplete");
+    await mkdir(incomplete);
+    await writeFile(path.join(incomplete, "package.json"), "{\"name\":\"all-round-ai\",\"version\":\"0.3.0\"}\n");
+    await assert.rejects(
+      packRelease({ sourceDir: incomplete, outDir: path.join(root, "out-incomplete") }),
+      /缺少必需文件/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("health checks retry failures and report the last error", async () => {
   let calls = 0;
   const eventual = async () => {
@@ -312,6 +375,16 @@ test("the CLI verifies, installs, activates, reports status and rolls back", asy
       cli, "rollback", "--releases", releasesRoot, "--current", currentPath, "--state", stateFile,
     ])).stdout);
     assert.equal(rolled.version, "0.1.0");
+
+    const source = path.join(root, "source");
+    await mkdir(path.join(source, "portable", "apps", "runtime", "src"), { recursive: true });
+    await writeFile(path.join(source, "package.json"), "{\"name\":\"all-round-ai\",\"version\":\"0.5.0\"}\n");
+    await writeFile(path.join(source, "portable", "apps", "runtime", "src", "main.mjs"), "console.log('pack');\n");
+    const packed = JSON.parse((await run(process.execPath, [
+      cli, "pack", "--source", source, "--out", path.join(root, "packages"),
+    ])).stdout);
+    assert.equal(packed.version, "0.5.0");
+    assert.equal((await verifyReleasePackage(packed.directory)).ok, true);
 
     const failedHealth = await run(process.execPath, [
       cli, "health", "--url", "http://127.0.0.1:9/health", "--attempts", "1", "--delay-ms", "0",

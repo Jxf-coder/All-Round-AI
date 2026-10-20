@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -15,6 +15,8 @@ import {
   unlink,
 } from "node:fs/promises";
 import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { setTimeout as wait } from "node:timers/promises";
 
 import { writeJsonFile } from "../../../packages/platform/src/storage.mjs";
@@ -270,6 +272,138 @@ export async function installRelease({ packageDir, releasesRoot, now = () => new
     totalBytes,
     installedAt: now().toISOString(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Release packaging.
+//
+// The source tree is copied into `all-round-ai-<version>/` while every byte is
+// hashed, then `release.json` is written from the copy itself. The package is
+// verified again before it is reported as built, so a package that `install`
+// would reject can never be produced here.
+// ---------------------------------------------------------------------------
+
+export const REQUIRED_RELEASE_FILES = ["package.json", "portable/apps/runtime/src/main.mjs"];
+// Never shipped: version control metadata, dependencies and OS droppings.
+const ALWAYS_EXCLUDED = new Set([".git", "node_modules", ".DS_Store", "Thumbs.db"]);
+// Repository-root entries that are local state rather than application code:
+// the read-only reference baseline, backups, logs and a data directory created
+// inside the checkout by an ad-hoc local run.
+const ROOT_EXCLUDED = new Set(["reference", "backups", "logs", "data"]);
+
+function formatVersion(parsed) {
+  const base = `${parsed.major}.${parsed.minor}.${parsed.patch}`;
+  return parsed.prerelease.length > 0 ? `${base}-${parsed.prerelease.join(".")}` : base;
+}
+
+async function copyWithHash(source, destination, relative) {
+  const hash = createHash("sha256");
+  let size = 0;
+  const meter = new Transform({
+    transform(chunk, _encoding, callback) {
+      hash.update(chunk);
+      size += chunk.length;
+      callback(null, chunk);
+    },
+  });
+  await pipeline(
+    createReadStream(source),
+    meter,
+    createWriteStream(destination, { mode: 0o644 }),
+  );
+  return { path: relative, size, sha256: hash.digest("hex") };
+}
+
+async function copyPackageTree(sourceRoot, destinationRoot, prefix, files) {
+  const entries = await readdir(sourceRoot, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    if (ALWAYS_EXCLUDED.has(entry.name)) continue;
+    if (!prefix && ROOT_EXCLUDED.has(entry.name)) continue;
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isSymbolicLink()) {
+      throw new Error(`源码目录包含符号链接，拒绝打包：${relative}`);
+    }
+    const source = path.join(sourceRoot, entry.name);
+    const target = path.join(destinationRoot, entry.name);
+    if (entry.isDirectory()) {
+      await mkdir(target, { recursive: true, mode: 0o755 });
+      await copyPackageTree(source, target, relative, files);
+    } else if (entry.isFile()) {
+      files.push(await copyWithHash(source, target, relative));
+    } else {
+      throw new Error(`源码目录包含不支持的文件类型：${relative}`);
+    }
+  }
+}
+
+export async function packRelease({
+  sourceDir,
+  outDir,
+  version,
+  now = () => new Date(),
+}) {
+  const source = assertAbsolute(sourceDir, "源码目录");
+  const outputRoot = assertAbsolute(outDir, "输出目录");
+  const relativeOutput = path.relative(source, outputRoot);
+  if (relativeOutput === "" || (!relativeOutput.startsWith("..") && !path.isAbsolute(relativeOutput))) {
+    throw new Error("输出目录不能位于源码目录内");
+  }
+
+  let sourcePackage;
+  try {
+    sourcePackage = JSON.parse(await readFile(path.join(source, "package.json"), "utf8"));
+  } catch {
+    throw new Error("源码目录缺少可读的 package.json");
+  }
+  const requested = version ?? sourcePackage.version;
+  if (typeof requested !== "string" || requested.trim() === "") {
+    throw new Error("源码 package.json 没有版本号，请用 --version 指定");
+  }
+  const normalized = formatVersion(parseVersion(requested));
+  if (typeof sourcePackage.version === "string"
+    && formatVersion(parseVersion(sourcePackage.version)) !== normalized) {
+    throw new Error(`版本号与 package.json 不一致：${normalized} 对 ${sourcePackage.version}`);
+  }
+
+  const destination = path.join(outputRoot, `${RELEASE_PRODUCT}-${normalized}`);
+  const existing = await stat(destination).catch(() => null);
+  if (existing) throw new Error(`发布包已存在：${destination}`);
+  await mkdir(destination, { recursive: true, mode: 0o755 });
+
+  try {
+    const files = [];
+    await copyPackageTree(source, destination, "", files);
+    for (const required of REQUIRED_RELEASE_FILES) {
+      if (!files.some((file) => file.path === required)) {
+        throw new Error(`发布包缺少必需文件：${required}`);
+      }
+    }
+    const manifest = {
+      schema: RELEASE_SCHEMA,
+      product: RELEASE_PRODUCT,
+      version: normalized,
+      createdAt: now().toISOString(),
+      files,
+      totalBytes: files.reduce((total, file) => total + file.size, 0),
+    };
+    await writeJsonFile(path.join(destination, RELEASE_MANIFEST_NAME), manifest);
+    const verification = await verifyReleasePackage(destination);
+    if (!verification.ok) {
+      const first = verification.errors[0];
+      throw new Error(`打包后校验失败：${first.path}（${first.reason}）`);
+    }
+    return {
+      version: normalized,
+      directory: destination,
+      files: files.length,
+      totalBytes: manifest.totalBytes,
+      createdAt: manifest.createdAt,
+    };
+  } catch (error) {
+    await rm(destination, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function readState(stateFile) {

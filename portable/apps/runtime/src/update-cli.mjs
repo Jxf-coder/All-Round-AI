@@ -7,12 +7,14 @@ import {
   defaultCurrentPath,
   defaultStateFile,
   installRelease,
+  packRelease,
   releaseStatus,
   rollbackRelease,
   verifyReleasePackage,
 } from "./updater.mjs";
 
 const USAGE = `用法：
+  node update-cli.mjs pack     --source <源码目录> --out <输出目录> [--version <版本>]
   node update-cli.mjs verify   --package <发布包目录>
   node update-cli.mjs install  --package <发布包目录> --releases <发布目录>
   node update-cli.mjs activate --releases <发布目录> --version <版本> [--current <入口路径>] [--state <状态文件>]
@@ -21,6 +23,8 @@ const USAGE = `用法：
   node update-cli.mjs health   --url <健康检查地址> [--attempts <次数>] [--delay-ms <毫秒>]
 
 --current 默认 <发布目录>/../current，--state 默认 <发布目录>/../state/releases.json。
+pack 复制源码树（跳过 .git、node_modules 与根目录的 reference/backups/logs/data）
+并生成 release.json，输出目录不能位于源码目录内。
 install 只复制清单内的文件并再次校验，不会覆盖已存在的版本；activate 只切换 current 链接，
 不改动应用数据；rollback 切回上一个版本，同样不改动数据。`;
 
@@ -39,6 +43,8 @@ try {
     allowPositionals: true,
     options: {
       package: { type: "string" },
+      source: { type: "string" },
+      out: { type: "string" },
       releases: { type: "string" },
       current: { type: "string" },
       state: { type: "string" },
@@ -50,7 +56,16 @@ try {
   });
   const command = positionals[0];
 
-  if (command === "verify") {
+  if (command === "pack") {
+    const result = await packRelease({
+      sourceDir: required(values, "source", "pack"),
+      outDir: required(values, "out", "pack"),
+      version: typeof values.version === "string" && values.version.trim() !== ""
+        ? values.version.trim()
+        : undefined,
+    });
+    print({ ok: true, ...result });
+  } else if (command === "verify") {
     const result = await verifyReleasePackage(required(values, "package", "verify"));
     print({
       ok: result.ok,
