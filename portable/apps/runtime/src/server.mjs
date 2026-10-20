@@ -12,6 +12,7 @@ import { createAuthStateStore } from "./auth-state.mjs";
 import { createLocalAuth } from "./auth.mjs";
 import { createConfigStore } from "./config-store.mjs";
 import { createConversationStore } from "./conversations.mjs";
+import { createDeviceRegistry, readDeviceToken } from "./devices.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
@@ -248,6 +249,10 @@ export async function startLocalRuntime(options = {}) {
   const turnStore = options.turnStore
     ?? createTurnManager({ filePath: path.join(directories.config, "chat-turns.json") });
   await turnStore.recover();
+  // Desk agents pair once with a short-lived ticket and then heartbeat with
+  // their own token. Only token hashes are persisted.
+  const deviceRegistry = options.deviceRegistry
+    ?? await createDeviceRegistry({ filePath: path.join(directories.config, "devices.json") });
 
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
@@ -386,6 +391,83 @@ export async function startLocalRuntime(options = {}) {
     }
     const accounts = await accountStore.list();
     json(ctx.response, 200, { accounts });
+    return true;
+  });
+
+  // Desk devices. Pairing is the only unauthenticated surface: the single-use
+  // ticket is the credential, and the device token it returns is never stored
+  // in plain text. Listing and revoking stay behind the normal account gate.
+  router.get("/api/devices", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    json(ctx.response, 200, { devices: await deviceRegistry.list() });
+    return true;
+  });
+
+  router.post("/api/devices/tickets", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    if (actor.role !== "admin") {
+      json(ctx.response, 403, { error: "没有管理员权限" });
+      return true;
+    }
+    json(ctx.response, 201, deviceRegistry.issueTicket({ actorId: actor.id }));
+    return true;
+  });
+
+  router.post("/api/devices/pair", async (ctx) => {
+    try {
+      const body = await readJsonBody(ctx.request, { maxBytes: 8 * 1024 });
+      const result = await deviceRegistry.pair({
+        ticket: body.ticket,
+        name: body.name,
+        platform: body.platform,
+        version: body.version,
+        capabilities: body.capabilities,
+      });
+      json(ctx.response, 201, result);
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "配对失败" });
+    }
+    return true;
+  });
+
+  router.post("/api/devices/heartbeat", async (ctx) => {
+    const token = readDeviceToken(ctx.request);
+    if (!token) {
+      json(ctx.response, 401, { error: "缺少设备凭据" });
+      return true;
+    }
+    try {
+      const body = await readOptionalJsonBody(ctx, { maxBytes: 8 * 1024 });
+      const device = await deviceRegistry.heartbeat({
+        token,
+        version: body.version,
+        capabilities: body.capabilities,
+      });
+      json(ctx.response, 200, { device });
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "心跳失败" });
+    }
+    return true;
+  });
+
+  router.delete("/api/devices/:id", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    if (actor.role !== "admin") {
+      json(ctx.response, 403, { error: "没有管理员权限" });
+      return true;
+    }
+    try {
+      const removed = await deviceRegistry.revoke(ctx.params.id);
+      if (!removed) {
+        json(ctx.response, 404, { error: "设备不存在" });
+        return true;
+      }
+      json(ctx.response, 200, { removed: true });
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "移除失败" });
+    }
     return true;
   });
 
