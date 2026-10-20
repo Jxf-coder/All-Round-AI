@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as wait } from "node:timers/promises";
 
 import { resolveDataDirectory } from "../../../packages/platform/src/paths.mjs";
 import { writeJsonFile } from "../../../packages/platform/src/storage.mjs";
@@ -140,9 +141,58 @@ export async function sendHeartbeat({
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (response.status === 401) throw new Error("设备凭据已失效，请重新配对");
+  if (response.status === 401) {
+    const error = new Error("设备凭据已失效，请重新配对");
+    error.code = "DEVICE_UNAUTHORIZED";
+    throw error;
+  }
   if (!response.ok) throw new Error(`心跳失败（HTTP ${response.status}）：${await readError(response)}`);
   const parsed = await response.json();
   if (!parsed?.device?.id) throw new Error("服务器返回的心跳结果不完整");
   return parsed.device;
+}
+
+// Keeps a paired desk online until the caller aborts. Network failures back
+// off exponentially up to a ceiling; an invalid token stops the loop instead
+// of retrying forever, because only a new pairing can fix it.
+export async function runHeartbeatLoop({
+  config,
+  intervalMs = 30_000,
+  maxBackoffMs = 300_000,
+  fetchImpl = globalThis.fetch,
+  signal,
+  onBeat = () => {},
+  onError = () => {},
+  waitImpl = wait,
+}) {
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1_000) {
+    throw new TypeError("心跳间隔至少 1000 毫秒");
+  }
+  if (!Number.isSafeInteger(maxBackoffMs) || maxBackoffMs < intervalMs) {
+    throw new TypeError("最大退避不能小于心跳间隔");
+  }
+
+  let delay = intervalMs;
+  let beats = 0;
+  let failures = 0;
+  for (;;) {
+    if (signal?.aborted) break;
+    try {
+      const device = await sendHeartbeat({ config, fetchImpl });
+      beats += 1;
+      delay = intervalMs;
+      onBeat(device);
+    } catch (error) {
+      if (error.code === "DEVICE_UNAUTHORIZED") throw error;
+      failures += 1;
+      onError(error);
+      delay = Math.min(delay * 2, maxBackoffMs);
+    }
+    try {
+      await waitImpl(delay, undefined, signal ? { signal } : undefined);
+    } catch {
+      break;
+    }
+  }
+  return { beats, failures };
 }

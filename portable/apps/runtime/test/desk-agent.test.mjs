@@ -11,6 +11,7 @@ import test from "node:test";
 import {
   loadAgentConfig,
   pairDevice,
+  runHeartbeatLoop,
   saveAgentConfig,
   sendHeartbeat,
 } from "../src/desk-agent.mjs";
@@ -162,6 +163,60 @@ test("a missing, damaged or incomplete config fails closed", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("the heartbeat loop backs off on failures and stops when aborted", async () => {
+  const config = { serverUrl: "http://127.0.0.1:3141", token: TOKEN };
+  let attempts = 0;
+  const fetchImpl = async () => {
+    attempts += 1;
+    if (attempts <= 2) throw new Error("connect ECONNREFUSED");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ device: { id: "dev-0123456789ab", status: "online" } }),
+    };
+  };
+  const waits = [];
+  const beats = [];
+  const errors = [];
+  const controller = new AbortController();
+  const summary = await runHeartbeatLoop({
+    config,
+    intervalMs: 1_000,
+    maxBackoffMs: 4_000,
+    fetchImpl,
+    signal: controller.signal,
+    waitImpl: async (ms) => {
+      waits.push(ms);
+      if (waits.length === 4) controller.abort();
+    },
+    onBeat: (device) => beats.push(device),
+    onError: (error) => errors.push(error.message),
+  });
+  assert.deepEqual(waits, [2_000, 4_000, 1_000, 1_000]);
+  assert.equal(summary.failures, 2);
+  assert.equal(summary.beats, 2);
+  assert.equal(beats.length, 2);
+  assert.equal(errors.length, 2);
+  assert.match(errors[0], /ECONNREFUSED/u);
+});
+
+test("an invalid token stops the loop instead of retrying", async () => {
+  await assert.rejects(
+    runHeartbeatLoop({
+      config: { serverUrl: "http://127.0.0.1:3141", token: TOKEN },
+      fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({ error: "设备凭据无效" }) }),
+      waitImpl: async () => {
+        throw new Error("should not wait");
+      },
+    }),
+    /设备凭据已失效/u,
+  );
+  await assert.rejects(
+    runHeartbeatLoop({ config: { serverUrl: "http://127.0.0.1:3141", token: TOKEN }, intervalMs: 500 }),
+    /至少 1000 毫秒/u,
+  );
 });
 
 test("the CLI pairs, heartbeats and reports status without the token", async () => {
