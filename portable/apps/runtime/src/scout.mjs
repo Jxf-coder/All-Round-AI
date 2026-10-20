@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { lstat, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
 import { createJsonFileStore } from "../../../packages/platform/src/storage.mjs";
@@ -209,7 +209,7 @@ export function buildScoutReport({ label, goal, root, counts, kept, skipped, tru
     `目标：${goal || "未填写（按文件名与禁入词筛选）"}`,
     `来源：服务器目录 · ${root}`,
     `扫了 ${counts.files} 个文件 / ${counts.dirs} 个文件夹；规则筛掉 ${counts.rule}，留下 ${counts.keep} 个候选。`,
-    "本批只做本地规则筛选，尚未调用 AI 提炼；留下的文件还不是知识卡。",
+    "本批只做本地规则筛选；点「提炼候选」才会调用 AI 生成待确认卡。",
   ];
   if (counts.errors > 0) lines.push(`有 ${counts.errors} 个目录或文件读不了，已跳过。`);
   if (truncated) lines.push("目录太大，只列了前面一部分（上限 800 个文件夹 / 5000 个文件）。");
@@ -246,6 +246,55 @@ export function buildScoutReport({ label, goal, root, counts, kept, skipped, tru
   return lines.join("\n");
 }
 
+export const SCOUT_TEXT_MAX_BYTES = 1024 * 1024;
+
+const SECRET_RE = /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9_-]{20,}|cursor_[A-Za-z0-9_-]{20,}|key_[A-Za-z0-9]{24,}|AKIA[A-Z0-9]{16}|LTAI[A-Za-z0-9]{12,}|eyJhbGciOi[A-Za-z0-9_-]{30,})\b/u;
+const PII_RE = /\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b/gu;
+
+// Content-level gates run before any model call. They are deliberately blunt:
+// refusing a document is cheaper than sending credentials or an employee list
+// through a model, and the person can still open the file and add a card.
+export function detectSensitive(text) {
+  const value = String(text ?? "");
+  if (SECRET_RE.test(value)) return "正文疑似含密钥或密码，已拒绝";
+  const ids = value.match(PII_RE);
+  if (ids && ids.length >= 3) return "正文含多个身份证号，像人员或财务资料";
+  return null;
+}
+
+// Reads one kept candidate. The path is re-proven inside the run root and the
+// file must still be a regular file: a candidate may have been replaced by a
+// symlink between the scan and the distillation run.
+export async function readCandidateText(root, relativePath) {
+  if (typeof relativePath !== "string" || !relativePath) {
+    throw new TypeError("文件路径为空");
+  }
+  if (path.isAbsolute(relativePath)) throw new TypeError("文件路径不能是绝对路径");
+  const absolute = path.resolve(root, relativePath);
+  const relative = path.relative(root, absolute);
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)) {
+    throw new Error("文件不在巡读目录里");
+  }
+  const info = await lstat(absolute);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("不是普通文件");
+  if (info.size > SCOUT_TEXT_MAX_BYTES) {
+    throw new Error("文件超过 1 MB，暂不提炼");
+  }
+  const raw = await readFile(absolute, "utf8");
+  return { text: raw.replace(/^\uFEFF/u, ""), size: info.size };
+}
+
+function buildDistillSection(summary) {
+  const lines = [
+    `## 提炼结果（${summary.at}）`,
+    `读了 ${summary.read} 份正文，新增待确认卡 ${summary.cards} 张，合并重复 ${summary.merged} 张，丢弃未核对 ${summary.dropped} 条。`,
+  ];
+  for (const item of summary.skipped) lines.push(`- 跳过 ${item.path}：${item.reason}`);
+  for (const item of summary.errors) lines.push(`- 出错 ${item.path}：${item.message}`);
+  return lines.join("\n");
+}
+
 function validateCounts(counts) {
   if (!counts || typeof counts !== "object") return false;
   return ["dirs", "files", "rule", "keep", "errors"]
@@ -271,7 +320,21 @@ function validateRun(run) {
       && Array.isArray(group.examples)
       && group.examples.every((example) => typeof example === "string"))
     && typeof run.truncated === "boolean"
+    && (run.distill === undefined || validateDistill(run.distill))
     && typeof run.report === "string";
+}
+
+function validateDistill(summary) {
+  return summary && typeof summary === "object"
+    && typeof summary.at === "string" && !Number.isNaN(Date.parse(summary.at))
+    && ["files", "read", "cards", "merged", "dropped"]
+      .every((key) => Number.isSafeInteger(summary[key]) && summary[key] >= 0)
+    && Array.isArray(summary.skipped)
+    && summary.skipped.every((item) => item && typeof item.path === "string"
+      && typeof item.reason === "string")
+    && Array.isArray(summary.errors)
+    && summary.errors.every((item) => item && typeof item.path === "string"
+      && typeof item.message === "string");
 }
 
 function validateDocument(value) {
@@ -356,6 +419,19 @@ export async function createScoutStore(filePath) {
       const { projects } = await store.read();
       const project = projects.find((item) => item.projectId === projectId);
       return project?.runs.find((item) => item.id === id) ?? null;
+    },
+    // Distillation happens after the scan, so its result is attached to the
+    // same run instead of creating a second history entry. The report keeps the
+    // scan and the extraction side by side for later review.
+    async attachDistill(projectId, id, summary) {
+      return store.update((document) => {
+        const project = document.projects.find((item) => item.projectId === projectId);
+        const run = project?.runs.find((item) => item.id === id);
+        if (!run) return null;
+        run.distill = summary;
+        run.report = `${run.report}\n\n${buildDistillSection(summary)}`;
+        return run;
+      });
     },
   });
 }

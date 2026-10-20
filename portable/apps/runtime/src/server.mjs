@@ -17,9 +17,15 @@ import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
 import { buildKnowledgeBlock, createKnowledgeStore } from "./knowledge.mjs";
 import { createHandover, latestHandover, readHandover } from "./handover.mjs";
-import { forbiddenTerms } from "./intake.mjs";
+import { forbiddenTerms, cleanIntake, DEFAULT_CATEGORIES, standardCardBody } from "./intake.mjs";
 import { createSourceStore, resolveScoutRoot } from "./sources.mjs";
-import { createScoutStore } from "./scout.mjs";
+import { createScoutStore, detectSensitive, readCandidateText } from "./scout.mjs";
+import {
+  DISTILL_MAX_FILES,
+  buildDistillPrompt as buildKnowledgeDistillPrompt,
+  filterGroundedDrafts,
+  parseDistillReply as parseKnowledgeDistillReply,
+} from "./distill.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
@@ -1059,6 +1065,87 @@ export async function startLocalRuntime(options = {}) {
             forbidden: forbiddenTerms(intake?.fields ?? null),
           });
           json(ctx.response, 200, { action: body.action, run, report: run.report });
+          return true;
+        }
+        case "scoutDistill": {
+          if (typeof body.runId !== "string" || !body.runId) {
+            json(ctx.response, 400, { error: "请选择要提炼的巡读" });
+            return true;
+          }
+          const run = await scoutStore.get(projectId, body.runId);
+          if (!run) {
+            json(ctx.response, 404, { error: "没有这次巡读" });
+            return true;
+          }
+          if (run.kept.length === 0) {
+            json(ctx.response, 400, { error: "这次巡读没有可提炼的候选文件" });
+            return true;
+          }
+          const intake = (await knowledgeStore.list(projectId)).intake;
+          const fields = cleanIntake(intake?.fields ?? {});
+          const { provider, model } = await resolveEngineModel(body.engine);
+          const summary = {
+            at: new Date().toISOString(),
+            files: 0,
+            read: 0,
+            cards: 0,
+            merged: 0,
+            dropped: 0,
+            skipped: [],
+            errors: [],
+          };
+          for (const file of run.kept.slice(0, DISTILL_MAX_FILES)) {
+            summary.files += 1;
+            let content;
+            try {
+              content = await readCandidateText(run.root, file.path);
+            } catch (error) {
+              summary.errors.push({ path: file.path, message: error.message || "读取失败" });
+              continue;
+            }
+            const sensitive = detectSensitive(content.text);
+            if (sensitive) {
+              summary.skipped.push({ path: file.path, reason: sensitive });
+              continue;
+            }
+            summary.read += 1;
+            try {
+              const reply = await provider.chat({
+                model,
+                messages: [{
+                  role: "user",
+                  content: buildKnowledgeDistillPrompt({
+                    fileName: file.path,
+                    text: content.text,
+                    goal: run.goal,
+                    product: fields.product,
+                    categories: DEFAULT_CATEGORIES,
+                    standard: standardCardBody(fields),
+                    redLines: fields.redLines,
+                    forbidden: forbiddenTerms(fields),
+                  }),
+                }],
+                effort: "low",
+                fast: true,
+                signal: ctx.signal,
+              });
+              const drafts = parseKnowledgeDistillReply(reply?.content ?? "");
+              const grounded = filterGroundedDrafts(drafts, content.text);
+              summary.dropped += grounded.dropped;
+              const result = await knowledgeStore.addExtractedCards(projectId, grounded.accepted, {
+                source: file.path,
+              });
+              summary.cards += result.added.length;
+              summary.merged += result.merged;
+            } catch (error) {
+              summary.errors.push({
+                path: file.path,
+                message: (error.message || "提炼失败").slice(0, 300),
+              });
+            }
+          }
+          const updated = await scoutStore.attachDistill(projectId, run.id, summary);
+          json(ctx.response, 200, { action: body.action, run: updated, summary });
           return true;
         }
         default:

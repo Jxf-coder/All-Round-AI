@@ -78,7 +78,7 @@ test("a scan keeps readable files and reports duplicates and forbidden paths", a
     assert.match(report, /## 没留的（按原因）/u);
     assert.match(report, /产品参数\.md/u);
     assert.match(report, /禁入词「合同」/u);
-    assert.match(report, /尚未调用 AI 提炼/u);
+    assert.match(report, /点「提炼候选」/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -162,6 +162,13 @@ function cloneCard(card) {
   };
 }
 
+// Two extracted cards are "the same topic" when their kind matches and the
+// title differs only by case, width, spaces or punctuation. Digits are kept, so
+// "交期 7 天" and "交期 15 天" stay two cards rather than one silently updated.
+function titleKey(title) {
+  return String(title).normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
 function cloneIntake(intake) {
   return {
     at: intake.at,
@@ -380,6 +387,58 @@ export async function createKnowledgeStore(filePath) {
           cards: cards.map((card) => card.id),
           questions: merged.filter((item) => item.from === "intake").length,
         };
+      });
+    },
+    // Extracted cards always start pending. A duplicate title of the same kind
+    // is counted as merged and not written again, so repeated scout runs do not
+    // flood the review list.
+    async addExtractedCards(projectId, drafts, { source = "" } = {}) {
+      requireProject(projectId);
+      if (!Array.isArray(drafts)) throw new TypeError("提炼结果必须是数组");
+      const cardSource = optionalText(source, "来源", MAX_CARD_TITLE) ?? null;
+      return store.update((document) => {
+        const project = projectOf(document, projectId);
+        const seen = new Set(
+          project.cards
+            .filter((card) => card.status !== "dropped")
+            .map((card) => `${card.kind}\u0000${titleKey(card.title)}`),
+        );
+        const added = [];
+        let merged = 0;
+        for (const draft of drafts) {
+          if (!draft || typeof draft !== "object" || !KIND_SET.has(draft.kind)) continue;
+          let title;
+          let body;
+          try {
+            title = text(draft.title, "标题", MAX_CARD_TITLE);
+            body = text(draft.body, "内容", MAX_CARD_BODY);
+          } catch {
+            continue;
+          }
+          const key = `${draft.kind}\u0000${titleKey(title)}`;
+          if (seen.has(key)) {
+            merged += 1;
+            continue;
+          }
+          if (project.cards.length >= MAX_CARDS) {
+            throw new Error("知识卡数量已达上限，请先清理旧卡片");
+          }
+          const now = new Date().toISOString();
+          const card = {
+            id: randomUUID(),
+            kind: draft.kind,
+            title,
+            body,
+            status: "pending",
+            source: cardSource,
+            createdAt: now,
+            updatedAt: now,
+          };
+          project.cards.push(card);
+          seen.add(key);
+          added.push(cloneCard(card));
+        }
+        return { added, merged };
       });
     },
     async addCard(projectId, { kind, title, body, source } = {}) {

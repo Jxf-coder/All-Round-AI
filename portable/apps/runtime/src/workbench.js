@@ -1091,6 +1091,8 @@ let intakeNotice = "";
 // The report of one scout run, kept outside knowledgeState because the list
 // endpoint deliberately returns summaries only.
 let scoutReport = null;
+let scoutNotice = "";
+let scoutError = "";
 
 // Same order and short labels as the reference knowledge panel:范围与边界在前，
 // 营销 Plan 的细节在后。`wide` fields also span both columns.
@@ -1364,7 +1366,12 @@ function renderScoutBlock() {
     const row = element("div", "scout-run");
     row.append(element("span", "scout-title", run.label));
     row.append(element("span", "scout-meta",
-      `${new Date(run.createdAt).toLocaleString()} · 扫 ${run.counts.files} · 留 ${run.counts.keep} · 筛 ${run.counts.rule}`));
+      `${new Date(run.createdAt).toLocaleString()} · 扫 ${run.counts.files} · 留 ${run.counts.keep} · 筛 ${run.counts.rule}`
+      + (run.distill ? ` · 提炼 ${run.distill.cards} 张` : "")));
+    if (!run.distill && run.kept?.length) {
+      const distill = actionButton("提炼候选", () => void distillScoutRun(run.id, distill));
+      row.append(distill);
+    }
     const open = actionButton(scoutReport?.id === run.id ? "收起报告" : "报告",
       () => void openScoutReport(run.id));
     row.append(open);
@@ -1380,8 +1387,47 @@ function renderScoutBlock() {
       list.append(details);
     }
   }
+  if (scoutNotice) list.append(element("p", "intake-notice", scoutNotice));
+  if (scoutError) list.append(element("p", "knowledge-error", scoutError));
   block.append(head, form, list);
   return block;
+}
+
+async function distillScoutRun(runId, button) {
+  button.disabled = true;
+  button.textContent = "提炼中…";
+  scoutNotice = "";
+  scoutError = "";
+  try {
+    const response = await apiRequest("/api/knowledge", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "scoutDistill",
+        projectId: currentProjectId,
+        runId,
+      }),
+    });
+    if (!response) return;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      button.disabled = false;
+      button.textContent = "提炼候选";
+      scoutError = body.error || "提炼失败";
+      renderKnowledgeBody();
+      return;
+    }
+    const summary = body.summary;
+    scoutNotice = `提炼完成：新增 ${summary.cards} 张待确认卡，合并 ${summary.merged}，`
+      + `丢弃未核对 ${summary.dropped}，跳过 ${summary.skipped.length}，出错 ${summary.errors.length}。`
+      + (summary.errors[0] ? `（${summary.errors[0].message}）` : "");
+    scoutReport = null;
+    await refreshKnowledge();
+  } catch {
+    button.disabled = false;
+    button.textContent = "提炼候选";
+    scoutError = "提炼失败，请稍后重试";
+    renderKnowledgeBody();
+  }
 }
 
 async function openScoutReport(id) {
@@ -1542,7 +1588,7 @@ function renderKnowledgeBody() {
   panelBody.append(handoverBlock);
 
   panelBody.append(element("p", "panel-note",
-    "回归题会在每次升级后重放本地检索；AI 提炼、条目索引与交接包导入尚未迁移。"));
+    "回归题会在每次升级后重放本地检索；条目索引与交接包导入尚未迁移。"));
 }
 
 async function exportHandover(statusNode) {

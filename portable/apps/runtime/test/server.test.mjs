@@ -83,6 +83,8 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(scriptSource, /renderScoutBlock/);
     assert.match(scriptSource, /sourcesSave/);
     assert.match(scriptSource, /scoutRun/);
+    assert.match(scriptSource, /scoutDistill/);
+    assert.match(scriptSource, /distillScoutRun/);
     assert.match(styleSource, /\.scout-report\{/);
     assert.match(scriptSource, /exportHandover/);
     assert.match(scriptSource, /\/api\/handover/);
