@@ -295,6 +295,26 @@ test("account setup command provisions an admin without putting a password in it
     assert.equal(memberResult.status, 0, memberResult.stderr);
     assert.match(memberResult.stdout, /All Round AI member account created/);
     assert.equal(await store.count(), 2);
+
+    // Provisioning from the CLI leaves the same audit entries the workbench
+    // reads, without any password material.
+    const auditLines = (await readFile(path.join(dataDirectory, "logs", "audit.jsonl"), "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.action.startsWith("account."));
+    assert.deepEqual(auditLines.map((entry) => entry.action), [
+      "account.create",
+      "account.reset-password",
+      "account.create",
+    ]);
+    assert.equal(auditLines[0].actor, "cli");
+    assert.equal(auditLines[0].target, "admin");
+    assert.match(auditLines[0].detail, /owner@example\.test/u);
+    assert.equal(auditLines[2].target, "member");
+    const auditText = JSON.stringify(auditLines);
+    assert.equal(auditText.includes(password), false);
+    assert.equal(auditText.includes(temporaryPassword), false);
   } finally {
     if (runtime) await runtime.close().catch(() => {});
     await rm(temporaryRoot, { recursive: true, force: true });
