@@ -1,6 +1,8 @@
 import { setTimeout as wait } from "node:timers/promises";
+import path from "node:path";
 
-import { listDirectory, readTextFile, writeTextFile } from "./local-files.mjs";
+import { listDirectory, readTextFile, resolveLocalPath, writeTextFile } from "./local-files.mjs";
+import { resolveAllowedProgram, runProcess } from "./local-process.mjs";
 
 // ---------------------------------------------------------------------------
 // Desk side of the command channel.
@@ -10,7 +12,7 @@ import { listDirectory, readTextFile, writeTextFile } from "./local-files.mjs";
 // so a workstation behind NAT can still serve the workbench.
 // ---------------------------------------------------------------------------
 
-const COMMAND_TYPES = new Set(["files.list", "files.read", "files.write"]);
+const COMMAND_TYPES = new Set(["files.list", "files.read", "files.write", "process.run"]);
 
 function unauthorized() {
   const error = new Error("设备凭据已失效，请重新配对");
@@ -40,16 +42,33 @@ export async function fetchNextCommand({
 export async function executeCommand({ config, command }) {
   if (!command || typeof command.type !== "string") throw new Error("设备命令格式无效");
   if (!COMMAND_TYPES.has(command.type)) throw new Error(`不支持的设备命令：${command.type}`);
+  const payload = command.payload ?? {};
+
+  if (command.type === "process.run") {
+    const program = await resolveAllowedProgram({ allow: config.allow, command: payload.command });
+    let cwd;
+    if (payload.cwd !== undefined && payload.cwd !== null && payload.cwd !== "") {
+      if (typeof payload.cwd !== "string" || !path.isAbsolute(payload.cwd)) {
+        throw new Error("工作目录必须是绝对路径");
+      }
+      if (!Array.isArray(config.roots) || config.roots.length === 0) {
+        throw new Error("设备没有配置允许访问的目录，无法指定工作目录");
+      }
+      cwd = (await resolveLocalPath({ roots: config.roots, target: payload.cwd })).realPath;
+    }
+    return runProcess({ program, args: payload.args ?? [], cwd, timeoutMs: payload.timeoutMs });
+  }
+
   if (!Array.isArray(config.roots) || config.roots.length === 0) {
     throw new Error("设备没有配置允许访问的目录，请重新配对并添加 --root");
   }
-  const target = command.payload?.path;
+  const target = payload.path;
   if (typeof target !== "string" || target.trim() === "") throw new Error("设备命令缺少路径");
   if (command.type === "files.list") {
     return listDirectory({ roots: config.roots, target });
   }
   if (command.type === "files.write") {
-    const content = command.payload?.content;
+    const content = payload.content;
     if (typeof content !== "string") throw new Error("设备命令缺少写入内容");
     return writeTextFile({ roots: config.roots, target, text: content });
   }

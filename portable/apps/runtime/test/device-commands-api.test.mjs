@@ -396,6 +396,92 @@ test("refused pairings, ticket issuance and revokes are audited", async () => {
   }
 });
 
+test("process commands validate their payload and outlive the default command timeout", async () => {
+  const app = await boot();
+  try {
+    const { device, token } = await app.pairDevice("程序工作站");
+    const endpoint = `${app.runtime.url}/api/devices/${device.id}/commands`;
+
+    const missing = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "process.run" }),
+    });
+    assert.equal(missing.status, 400);
+    assert.match((await missing.json()).error, /程序路径无效/u);
+
+    const tooManyArgs = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        type: "process.run",
+        command: "C:\\tools\\node.exe",
+        args: Array.from({ length: 33 }, () => "x"),
+      }),
+    });
+    assert.equal(tooManyArgs.status, 400);
+    assert.match((await tooManyArgs.json()).error, /参数无效/u);
+
+    const badTimeout = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "process.run", command: "C:\\tools\\node.exe", timeoutMs: 10 }),
+    });
+    assert.equal(badTimeout.status, 400);
+    assert.match((await badTimeout.json()).error, /超时/u);
+
+    const badCwd = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "process.run", command: "C:\\tools\\node.exe", cwd: "C:\\bad\npath" }),
+    });
+    assert.equal(badCwd.status, 400);
+    assert.match((await badCwd.json()).error, /工作目录无效/u);
+
+    const polling = fetch(`${app.runtime.url}/api/devices/commands?wait=5000`, {
+      headers: { authorization: `Bearer ${token}` },
+    }).then((response) => response.json());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const pending = fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        type: "process.run",
+        command: "C:\\tools\\node.exe",
+        args: ["--version"],
+        timeoutMs: 1_000,
+      }),
+    });
+    // The channel default expires after one second; a process command must
+    // still be waiting for its own timeout window.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    const polled = await polling;
+    assert.equal(polled.command.type, "process.run");
+    assert.deepEqual(polled.command.payload, {
+      command: "C:\\tools\\node.exe",
+      args: ["--version"],
+      timeoutMs: 1_000,
+    });
+
+    await fetch(`${app.runtime.url}/api/devices/commands/${polled.command.id}/result`, {
+      method: "POST",
+      headers: app.deviceHeaders(token),
+      body: JSON.stringify({ ok: true, result: { code: 0, stdout: "v22\n", stderr: "", timedOut: false, truncated: false } }),
+    });
+    const settled = await pending;
+    assert.equal(settled.status, 200);
+    assert.equal((await settled.json()).result.stdout, "v22\n");
+
+    const trail = await (await fetch(`${app.runtime.url}/api/audit?limit=5`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+    assert.equal(trail.entries[0].outcome, "ok");
+    assert.match(trail.entries[0].detail, /^process\.run /u);
+  } finally {
+    await app.close();
+  }
+});
+
 test("a result from another device never settles someone else's command", async () => {
   const app = await boot();
   try {

@@ -246,6 +246,8 @@ html.dark .fast-toggle.active{background:rgba(108,132,255,.2);border-color:rgba(
 .device-files li{font:10.5px monospace;line-height:1.8;color:#4c5b70}
 .device-files li.directory{color:#2f3f57;font-weight:600}
 .device-file-text{max-height:260px;margin:0;padding:8px;overflow:auto;border:1px solid var(--hairline);border-radius:8px;background:#fff;font:10.5px monospace;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.device-file-text.error{color:#d93b34}
+.device-process{display:flex;flex-direction:column;gap:6px;padding-top:7px;border-top:1px dashed var(--hairline)}
 .device-audit{margin:0;padding:0;display:flex;flex-direction:column;gap:6px;list-style:none}
 .device-audit li{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;padding:6px 8px;border:1px solid var(--hairline);border-radius:8px;background:#ffffffb8}
 .device-audit-outcome{justify-self:start;padding:1px 6px;border-radius:999px;background:#eef1f6;color:#7d8a9e;font-size:9px}
@@ -264,5 +266,6 @@ html.dark .device-probe-input,html.dark .device-probe-text,html.dark .device-fil
 html.dark .device-files li{color:#d0def8a8}
 html.dark .device-files li.directory{color:#dce4ff}
 html.dark .device-audit li{background:#101d30b8;border-color:var(--hairline)}
+html.dark .device-file-text.error{color:#ff8a80}
 html.dark .device-audit-main{color:#d0def8a8}
 html.dark .device-audit-time{color:#d0def86b}

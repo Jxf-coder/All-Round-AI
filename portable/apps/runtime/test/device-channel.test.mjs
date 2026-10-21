@@ -106,9 +106,25 @@ test("a device queue is capped so one dead desk cannot grow without bound", asyn
   await Promise.allSettled(pending.map((entry) => entry.wait));
 });
 
+test("a per-command timeout can outlive the channel default", async () => {
+  const channel = createDeviceChannel({ commandTtlMs: 1_000 });
+  const pending = channel.enqueue({
+    deviceId: "dev-aaaaaaaaaaaa",
+    type: "process.run",
+    payload: { command: "/bin/true" },
+    ttlMs: 3_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1_300));
+  const command = await channel.take({ deviceId: "dev-aaaaaaaaaaaa", waitMs: 10 });
+  assert.equal(command.id, pending.id);
+  channel.complete({ deviceId: "dev-aaaaaaaaaaaa", commandId: command.id, ok: true, result: { code: 0 } });
+  assert.deepEqual(await pending.wait, { code: 0 });
+});
+
 test("invalid input is rejected before anything is queued", () => {
   const channel = createDeviceChannel({ commandTtlMs: 1_000 });
   assert.throws(() => channel.enqueue({ deviceId: "", type: "files.list" }), TypeError);
   assert.throws(() => channel.enqueue({ deviceId: "dev-aaaaaaaaaaaa", type: "" }), TypeError);
+  assert.throws(() => channel.enqueue({ deviceId: "dev-aaaaaaaaaaaa", type: "files.list", ttlMs: 10 }), TypeError);
   assert.throws(() => createDeviceChannel({ commandTtlMs: 10 }), TypeError);
 });

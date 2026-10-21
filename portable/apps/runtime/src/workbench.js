@@ -1538,7 +1538,17 @@ function deviceCard(device) {
   const browse = actionButton("本机文件", () => {
     deviceProbe = deviceProbe?.deviceId === device.id
       ? null
-      : { deviceId: device.id, path: "", content: "", busy: false, result: null, error: null };
+      : {
+        deviceId: device.id,
+        path: "",
+        content: "",
+        program: "",
+        args: "",
+        cwd: "",
+        busy: false,
+        result: null,
+        error: null,
+      };
     renderDeviceBody();
   });
   if (!device.online) {
@@ -1553,23 +1563,42 @@ function deviceCard(device) {
 
 async function runDeviceCommand(device, type) {
   if (!deviceProbe) return;
-  const target = deviceProbe.path.trim();
-  if (!target) {
-    deviceProbe = { ...deviceProbe, error: "请先填写设备上的绝对路径。", result: null };
-    renderDeviceBody();
-    return;
-  }
-  if (type === "files.write" && deviceProbe.content === "") {
-    deviceProbe = { ...deviceProbe, error: "请先填写要写入的文本内容。", result: null };
-    renderDeviceBody();
-    return;
+  let payload;
+  if (type === "process.run") {
+    const program = deviceProbe.program.trim();
+    if (!program) {
+      deviceProbe = { ...deviceProbe, error: "请先填写要运行的程序绝对路径。", result: null };
+      renderDeviceBody();
+      return;
+    }
+    if (!window.confirm(`将在「${device.name}」上运行：\n${program}\n\n只允许配对时列入 --allow 的程序。继续？`)) {
+      return;
+    }
+    payload = {
+      type,
+      command: program,
+      args: deviceProbe.args.split("\n").map((line) => line.trim()).filter(Boolean),
+    };
+    if (deviceProbe.cwd.trim()) payload.cwd = deviceProbe.cwd.trim();
+  } else {
+    const target = deviceProbe.path.trim();
+    if (!target) {
+      deviceProbe = { ...deviceProbe, error: "请先填写设备上的绝对路径。", result: null };
+      renderDeviceBody();
+      return;
+    }
+    if (type === "files.write" && deviceProbe.content === "") {
+      deviceProbe = { ...deviceProbe, error: "请先填写要写入的文本内容。", result: null };
+      renderDeviceBody();
+      return;
+    }
+    payload = type === "files.write"
+      ? { type, path: target, content: deviceProbe.content }
+      : { type, path: target };
   }
   deviceProbe = { ...deviceProbe, busy: true, error: null, result: null };
   renderDeviceBody();
   try {
-    const payload = type === "files.write"
-      ? { type, path: target, content: deviceProbe.content }
-      : { type, path: target };
     const response = await apiRequest(
       `/api/devices/${encodeURIComponent(device.id)}/commands`,
       { method: "POST", body: JSON.stringify(payload) },
@@ -1604,16 +1633,48 @@ function deviceProbeBlock(device) {
   });
   block.append(content);
 
+  const processBlock = element("div", "device-process");
+  processBlock.append(element("p", "device-meta", "运行程序（仅限配对时 --allow 列入的程序，不经 shell）"));
+  const program = element("input", "device-probe-input");
+  program.type = "text";
+  program.placeholder = "程序绝对路径，例如 C:\\Program Files\\nodejs\\node.exe";
+  program.value = deviceProbe.program;
+  program.addEventListener("input", () => {
+    deviceProbe = { ...deviceProbe, program: program.value };
+  });
+  processBlock.append(program);
+
+  const args = element("textarea", "device-probe-text");
+  args.rows = 3;
+  args.placeholder = "每行一个参数，不需要引号";
+  args.value = deviceProbe.args;
+  args.addEventListener("input", () => {
+    deviceProbe = { ...deviceProbe, args: args.value };
+  });
+  processBlock.append(args);
+
+  const cwd = element("input", "device-probe-input");
+  cwd.type = "text";
+  cwd.placeholder = "可选：工作目录绝对路径（须在允许目录内）";
+  cwd.value = deviceProbe.cwd;
+  cwd.addEventListener("input", () => {
+    deviceProbe = { ...deviceProbe, cwd: cwd.value };
+  });
+  processBlock.append(cwd);
+  block.append(processBlock);
+
   const actions = element("div", "device-actions");
   const list = actionButton("列出目录", () => void runDeviceCommand(device, "files.list"));
   const read = actionButton("读取文件", () => void runDeviceCommand(device, "files.read"));
   const write = actionButton("写入文件", () => void runDeviceCommand(device, "files.write"));
+  const run = actionButton("运行程序", () => void runDeviceCommand(device, "process.run"));
   if (deviceProbe.busy) {
     list.disabled = true;
     read.disabled = true;
     write.disabled = true;
+    run.disabled = true;
   }
-  actions.append(list, read, write);
+  actions.append(list, read, write, run);
   block.append(actions);
 
   block.append(element(
@@ -1658,6 +1719,23 @@ function deviceProbeBlock(device) {
       "device-meta",
       `已写入 ${result.value?.path || ""} · ${result.value?.size ?? 0} 字节`,
     ));
+  } else if (result?.type === "process.run") {
+    const value = result.value ?? {};
+    block.append(element(
+      "p",
+      "device-meta",
+      `${value.program || ""} · 退出码 ${value.code ?? "无"}${value.timedOut ? " · 已超时终止" : ""}${value.truncated ? " · 输出已截断" : ""}`,
+    ));
+    if (typeof value.stdout === "string" && value.stdout !== "") {
+      const pre = element("pre", "device-file-text");
+      pre.textContent = value.stdout;
+      block.append(pre);
+    }
+    if (typeof value.stderr === "string" && value.stderr !== "") {
+      const pre = element("pre", "device-file-text error");
+      pre.textContent = value.stderr;
+      block.append(pre);
+    }
   }
   return block;
 }

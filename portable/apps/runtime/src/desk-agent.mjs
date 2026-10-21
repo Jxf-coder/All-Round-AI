@@ -76,23 +76,27 @@ export async function pairDevice({
   return { serverUrl: base, device: body.device, token: body.token };
 }
 
-function normalizeRoots(value) {
+function normalizeAbsoluteList(value, label) {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error("允许访问的目录必须是数组");
-  const roots = value.map((root) => {
-    if (typeof root !== "string" || !path.isAbsolute(root)) {
-      throw new Error("允许访问的目录必须是绝对路径");
+  if (!Array.isArray(value)) throw new Error(`${label}必须是数组`);
+  const entries = value.map((entry) => {
+    if (typeof entry !== "string" || !path.isAbsolute(entry)) {
+      throw new Error(`${label}必须是绝对路径`);
     }
-    const normalized = path.normalize(root);
+    const normalized = path.normalize(entry);
     // `path.normalize` keeps a trailing separator, so `/a/b/` and `/a/b`
-    // would otherwise count as two roots for the same directory.
+    // would otherwise count as two entries for the same path.
     const rootOnly = path.parse(normalized).root;
     return normalized === rootOnly ? normalized : normalized.replace(/[\\/]+$/u, "");
   });
-  return [...new Set(roots)];
+  return [...new Set(entries)];
 }
 
-export async function saveAgentConfig({ filePath, serverUrl, device, token, roots = [] }) {
+function normalizeRoots(value) {
+  return normalizeAbsoluteList(value, "允许访问的目录");
+}
+
+export async function saveAgentConfig({ filePath, serverUrl, device, token, roots = [], allow = [] }) {
   if (!path.isAbsolute(filePath)) throw new TypeError("配置文件必须是绝对路径");
   if (typeof token !== "string" || token.length < MIN_TOKEN_LENGTH) {
     throw new Error("设备令牌无效");
@@ -104,7 +108,8 @@ export async function saveAgentConfig({ filePath, serverUrl, device, token, root
     name: device.name,
     platform: device.platform,
     pairedAt: device.pairedAt,
-    roots: normalizeRoots(roots),
+    roots: normalizeAbsoluteList(roots, "允许访问的目录"),
+    allow: normalizeAbsoluteList(allow, "允许运行的程序"),
     token,
   });
   return { filePath, deviceId: device.id, name: device.name };
@@ -128,10 +133,12 @@ export async function loadAgentConfig(filePath) {
     throw new Error("设备配置缺少设备信息，请重新配对");
   }
   let roots;
+  let allow;
   try {
     roots = normalizeRoots(parsed.roots);
+    allow = normalizeAbsoluteList(parsed.allow, "允许运行的程序");
   } catch {
-    throw new Error("设备配置里的允许目录无效，请重新配对");
+    throw new Error("设备配置里的允许目录或允许程序无效，请重新配对");
   }
   return {
     schema: 1,
@@ -141,6 +148,7 @@ export async function loadAgentConfig(filePath) {
     platform: typeof parsed.platform === "string" ? parsed.platform : null,
     pairedAt: typeof parsed.pairedAt === "string" ? parsed.pairedAt : null,
     roots,
+    allow,
     token: parsed.token,
   };
 }

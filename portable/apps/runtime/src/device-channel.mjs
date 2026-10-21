@@ -35,9 +35,12 @@ export function createDeviceChannel({ commandTtlMs = 20_000 } = {}) {
     waiter(queue.shift());
   }
 
-  function enqueue({ deviceId, type, payload }) {
+  function enqueue({ deviceId, type, payload, ttlMs = commandTtlMs }) {
     if (typeof deviceId !== "string" || deviceId === "") throw new TypeError("deviceId is required");
     if (typeof type !== "string" || type === "") throw new TypeError("命令类型不能为空");
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000) {
+      throw new TypeError("命令超时至少 1000 毫秒");
+    }
     const queue = queues.get(deviceId) ?? [];
     if (queue.length >= MAX_QUEUE_PER_DEVICE) {
       throw new DeviceChannelError("BUSY", "设备还有未执行的命令，请稍后再试");
@@ -52,7 +55,7 @@ export function createDeviceChannel({ commandTtlMs = 20_000 } = {}) {
         const index = current?.findIndex((entry) => entry.id === id) ?? -1;
         if (index >= 0) current.splice(index, 1);
         reject(new DeviceChannelError("TIMEOUT", "设备没有在限定时间内响应"));
-      }, commandTtlMs);
+      }, ttlMs);
       pending.set(id, { deviceId, resolve, reject, timer });
     });
     queue.push({ id, type, payload });

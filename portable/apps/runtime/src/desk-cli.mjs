@@ -16,7 +16,7 @@ import { runCommandLoop } from "./desk-channel.mjs";
 import { writeDeskService } from "./desk-service.mjs";
 
 const USAGE = `用法：
-  node desk-cli.mjs pair      --server <实例地址> --ticket <配对票据> --name <设备名称> [--root <允许目录> ...] [--version <版本>] [--platform <平台>] [--capabilities a,b] [--config <文件>]
+  node desk-cli.mjs pair      --server <实例地址> --ticket <配对票据> --name <设备名称> [--root <允许目录> ...] [--allow <程序> ...] [--version <版本>] [--platform <平台>] [--capabilities a,b] [--config <文件>]
   node desk-cli.mjs heartbeat [--config <文件>] [--version <版本>]
   node desk-cli.mjs run       [--config <文件>] [--interval <秒>] [--max-backoff <秒>]
   node desk-cli.mjs service   --out <输出目录> [--config <文件>]
@@ -25,12 +25,14 @@ const USAGE = `用法：
 
 票据由管理员在工作台签发，十分钟内有效且只能使用一次。pair 会把设备令牌写入
 配置文件（默认位于本机数据目录的 desk-agent.json，权限 0600），--root 记录允许
-工作台访问的绝对目录。run 常驻上报心跳并长轮询执行命令（files.list / files.read），
-网络失败按指数退避（默认 30 秒起、最长 300 秒），令牌失效则立即停止。service 只
-生成当前平台的用户级服务文件（Linux systemd user、macOS LaunchAgent、Windows 登录
-计划任务），安装仍需手动执行。files 只访问 --root 指定目录内的路径：先解析符号
-链接再校验边界，拒绝越界、二进制与超过 256 KB 的文件。--write 先写同目录临时
-文件再原子替换，目标目录必须已存在。status 只显示配对摘要，不会输出令牌。`;
+工作台访问的绝对目录，--allow 记录允许运行的程序（执行时按解析后的真实路径比较，
+不经 shell、不继承环境变量）。run 常驻上报心跳并长轮询执行命令（files.list /
+files.read / files.write / process.run），网络失败按指数退避（默认 30 秒起、最长
+300 秒），令牌失效则立即停止。service 只生成当前平台的用户级服务文件（Linux
+systemd user、macOS LaunchAgent、Windows 登录计划任务），安装仍需手动执行。
+files 只访问 --root 指定目录内的路径：先解析符号链接再校验边界，拒绝越界、二进制
+与超过 256 KB 的文件。--write 先写同目录临时文件再原子替换，目标目录必须已存在。
+status 只显示配对摘要，不会输出令牌。`;
 
 function print(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -64,6 +66,7 @@ try {
       "max-backoff": { type: "string" },
       out: { type: "string" },
       root: { type: "string", multiple: true },
+      allow: { type: "string", multiple: true },
       list: { type: "string" },
       read: { type: "string" },
       write: { type: "string" },
@@ -78,11 +81,15 @@ try {
     if (!values.ticket) throw new Error("pair 需要 --ticket");
     if (!values.name) throw new Error("pair 需要 --name");
     const roots = values.root ?? [];
+    const allow = values.allow ?? [];
+    const declared = [];
+    if (roots.length) declared.push("files");
+    if (allow.length) declared.push("process");
     const capabilities = values.capabilities
       ? values.capabilities.split(",").map((entry) => entry.trim()).filter(Boolean)
-      // A desk that exposes roots can serve file commands, so advertise that
-      // instead of showing "未声明能力" for a fully usable device.
-      : roots.length ? ["files"] : [];
+      // A desk that exposes roots or programs can serve those commands, so
+      // advertise that instead of showing "未声明能力" for a usable device.
+      : declared;
     const paired = await pairDevice({
       serverUrl: values.server,
       ticket: values.ticket,
@@ -97,6 +104,7 @@ try {
       device: paired.device,
       token: paired.token,
       roots,
+      allow,
     });
     print({
       ok: true,
@@ -104,6 +112,7 @@ try {
       serverUrl: paired.serverUrl,
       device: paired.device,
       roots,
+      allow,
     });
   } else if (command === "heartbeat") {
     const config = await loadAgentConfig(configPath);
@@ -215,6 +224,7 @@ try {
       platform: config.platform,
       pairedAt: config.pairedAt,
       roots: config.roots,
+      allow: config.allow,
     });
   } else {
     process.stderr.write(`${USAGE}\n`);

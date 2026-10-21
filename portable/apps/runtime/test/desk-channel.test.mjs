@@ -109,6 +109,39 @@ test("file commands stay inside the configured roots", async () => {
   }
 });
 
+test("process commands only run allow-listed programs inside the roots", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "allround-desk-process-"));
+  try {
+    const config = { ...configWith([root]), allow: [process.execPath] };
+    const result = await executeCommand({
+      config,
+      command: {
+        type: "process.run",
+        payload: { command: process.execPath, args: ["-e", "process.stdout.write('hi')"] },
+      },
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, "hi");
+
+    await assert.rejects(
+      executeCommand({
+        config: { ...config, allow: [] },
+        command: { type: "process.run", payload: { command: process.execPath } },
+      }),
+      /没有配置允许运行的程序/u,
+    );
+    await assert.rejects(
+      executeCommand({
+        config,
+        command: { type: "process.run", payload: { command: process.execPath, cwd: path.join(root, "..") } },
+      }),
+      /不在允许访问的目录里/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("one poll executes the command and posts its result back", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "allround-desk-poll-"));
   try {

@@ -176,9 +176,11 @@ test("the config records allowed roots and refuses relative or malformed ones", 
       device: { id: "dev-0123456789ab", name: "办公室 PC", platform: "win32", pairedAt: "2026-10-20T08:00:00.000Z" },
       token: TOKEN,
       roots: [allowed, `${allowed}${path.sep}`, allowed],
+      allow: [process.execPath, process.execPath],
     });
     const loaded = await loadAgentConfig(configPath);
     assert.deepEqual(loaded.roots, [allowed]);
+    assert.deepEqual(loaded.allow, [process.execPath]);
 
     await assert.rejects(
       saveAgentConfig({
@@ -191,6 +193,17 @@ test("the config records allowed roots and refuses relative or malformed ones", 
       /必须是绝对路径/u,
     );
 
+    await assert.rejects(
+      saveAgentConfig({
+        filePath: configPath,
+        serverUrl: "http://127.0.0.1:3141",
+        device: { id: "dev-0123456789ab", name: "办公室 PC", platform: "win32", pairedAt: "2026-10-20T08:00:00.000Z" },
+        token: TOKEN,
+        allow: ["node"],
+      }),
+      /允许运行的程序必须是绝对路径/u,
+    );
+
     await writeFile(configPath, JSON.stringify({
       schema: 1,
       serverUrl: "http://127.0.0.1:3141",
@@ -199,7 +212,7 @@ test("the config records allowed roots and refuses relative or malformed ones", 
       token: TOKEN,
       roots: "not-an-array",
     }));
-    await assert.rejects(loadAgentConfig(configPath), /允许目录无效/u);
+    await assert.rejects(loadAgentConfig(configPath), /允许目录或允许程序无效/u);
 
     await writeFile(configPath, JSON.stringify({
       schema: 1,
@@ -209,7 +222,7 @@ test("the config records allowed roots and refuses relative or malformed ones", 
       token: TOKEN,
       roots: ["relative/path"],
     }));
-    await assert.rejects(loadAgentConfig(configPath), /允许目录无效/u);
+    await assert.rejects(loadAgentConfig(configPath), /允许目录或允许程序无效/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -304,6 +317,19 @@ test("the CLI pairs, heartbeats and reports status without the token", async () 
     assert.deepEqual(rooted.device.capabilities, ["files"]);
     assert.deepEqual(rooted.roots, [root]);
     assert.deepEqual(JSON.parse(await readFile(rootedPath, "utf8")).roots, [root]);
+
+    const processPath = path.join(root, "process.json");
+    const withProgram = JSON.parse((await run(process.execPath, [
+      cli, "pair",
+      "--server", stub.url,
+      "--ticket", "tkt_good",
+      "--name", "可运行程序的 PC",
+      "--allow", process.execPath,
+      "--config", processPath,
+    ])).stdout);
+    assert.deepEqual(withProgram.device.capabilities, ["process"]);
+    assert.deepEqual(withProgram.allow, [process.execPath]);
+    assert.deepEqual(JSON.parse(await readFile(processPath, "utf8")).allow, [process.execPath]);
 
     const beat = JSON.parse((await run(process.execPath, [
       cli, "heartbeat", "--config", configPath,

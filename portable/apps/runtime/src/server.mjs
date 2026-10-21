@@ -604,39 +604,83 @@ export async function startLocalRuntime(options = {}) {
         return true;
       }
       const body = await readJsonBody(ctx.request, { maxBytes: 1024 * 1024 });
-      if (!["files.list", "files.read", "files.write"].includes(body.type)) {
-        await record("denied", `不支持的命令类型：${body.type}`);
+      const type = body.type;
+      if (!["files.list", "files.read", "files.write", "process.run"].includes(type)) {
+        await record("denied", `不支持的命令类型：${type}`);
         json(ctx.response, 400, { error: "不支持的命令类型" });
         return true;
       }
-      const target = body.path;
-      if (typeof target !== "string" || target.trim() === "" || target.length > 4096
-        || /[\r\n\0]/u.test(target)) {
-        await record("denied", "路径无效");
-        json(ctx.response, 400, { error: "路径无效" });
-        return true;
-      }
-      const payload = { path: target };
-      if (body.type === "files.write") {
-        if (typeof body.content !== "string") {
-          await record("denied", "缺少写入内容");
-          json(ctx.response, 400, { error: "缺少写入内容" });
+      const payload = {};
+      let ttlMs;
+      if (type === "process.run") {
+        const command = body.command;
+        if (typeof command !== "string" || command.trim() === "" || command.length > 4096
+          || /[\r\n\0]/u.test(command)) {
+          await record("denied", "程序路径无效");
+          json(ctx.response, 400, { error: "程序路径无效" });
           return true;
         }
-        if (Buffer.byteLength(body.content, "utf8") > 256 * 1024) {
-          await record("denied", "写入内容超过 256 KB");
-          json(ctx.response, 400, { error: "写入内容超过 256 KB" });
+        const args = body.args === undefined ? [] : body.args;
+        if (!Array.isArray(args) || args.length > 32
+          || args.some((argument) => typeof argument !== "string"
+            || argument.length > 4096 || argument.includes("\0"))) {
+          await record("denied", "参数无效");
+          json(ctx.response, 400, { error: "参数无效（最多 32 个，每个不超过 4096 字符）" });
           return true;
         }
-        payload.content = body.content;
+        const timeoutMs = body.timeoutMs === undefined ? 10_000 : body.timeoutMs;
+        if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 60_000) {
+          await record("denied", "超时参数无效");
+          json(ctx.response, 400, { error: "超时必须是 1000 到 60000 之间的整数毫秒" });
+          return true;
+        }
+        let cwd = null;
+        if (body.cwd !== undefined && body.cwd !== null && body.cwd !== "") {
+          if (typeof body.cwd !== "string" || body.cwd.length > 4096 || /[\r\n\0]/u.test(body.cwd)) {
+            await record("denied", "工作目录无效");
+            json(ctx.response, 400, { error: "工作目录无效" });
+            return true;
+          }
+          cwd = body.cwd;
+        }
+        payload.command = command;
+        payload.args = args;
+        payload.timeoutMs = timeoutMs;
+        if (cwd) payload.cwd = cwd;
+        // The admin waits for the process, so the command must outlive its
+        // own timeout with a little room for the round trip.
+        ttlMs = timeoutMs + 10_000;
+      } else {
+        const target = body.path;
+        if (typeof target !== "string" || target.trim() === "" || target.length > 4096
+          || /[\r\n\0]/u.test(target)) {
+          await record("denied", "路径无效");
+          json(ctx.response, 400, { error: "路径无效" });
+          return true;
+        }
+        payload.path = target;
+        if (type === "files.write") {
+          if (typeof body.content !== "string") {
+            await record("denied", "缺少写入内容");
+            json(ctx.response, 400, { error: "缺少写入内容" });
+            return true;
+          }
+          if (Buffer.byteLength(body.content, "utf8") > 256 * 1024) {
+            await record("denied", "写入内容超过 256 KB");
+            json(ctx.response, 400, { error: "写入内容超过 256 KB" });
+            return true;
+          }
+          payload.content = body.content;
+        }
       }
       const { wait } = deviceChannel.enqueue({
         deviceId: ctx.params.id,
-        type: body.type,
+        type,
         payload,
+        ...(ttlMs ? { ttlMs } : {}),
       });
       const result = await wait;
-      await record("ok", `${body.type} ${target}`);
+      await record("ok", `${type} ${payload.command ?? payload.path}`);
       json(ctx.response, 200, { ok: true, result });
     } catch (error) {
       const status = error.code === "TIMEOUT" ? 504 : error.code === "BUSY" ? 429 : error.status || 400;
