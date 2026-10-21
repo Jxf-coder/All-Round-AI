@@ -92,6 +92,56 @@ export const AUTOMATION_PIPELINES = Object.freeze([
       },
     ],
   },
+  {
+    id: "script-draft",
+    name: "口播脚本草稿",
+    desc: "按主题、受众与目标时长起草口播脚本，只引用已确认知识；草稿必须人工确认后才算完成。",
+    steps: [
+      {
+        id: "draft",
+        name: "起草脚本",
+        runner: "app",
+        desc: "把主题、受众、时长与已确认知识交给当前 AI 引擎，产出按镜头分行的草稿。",
+        action: "ai.script-draft",
+        outputs: [{ slot: "script", label: "脚本草稿" }],
+        params: [
+          { key: "topic", label: "主题", type: "text", required: true, maxLength: 120 },
+          {
+            key: "audience",
+            label: "受众",
+            type: "select",
+            default: "boss",
+            options: [
+              { value: "boss", label: "企业老板" },
+              { value: "switcher", label: "转型者" },
+              { value: "operator", label: "操盘手" },
+            ],
+          },
+          { key: "durationSec", label: "目标时长（秒）", type: "number", default: 60, min: 15, max: 300 },
+          {
+            key: "tone",
+            label: "语气",
+            type: "select",
+            default: "sincere",
+            options: [
+              { value: "sincere", label: "真诚克制" },
+              { value: "sharp", label: "直接犀利" },
+              { value: "warm", label: "温和陪伴" },
+            ],
+          },
+          { key: "maxCards", label: "最多引用知识卡", type: "number", default: 5, min: 0, max: 20 },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "读一遍脚本，确认事实与语气后结束本次运行。",
+        after: ["draft"],
+        manualHint: "读完脚本并核对事实后点击「我做完了」",
+      },
+    ],
+  },
 ]);
 
 function fail(message) {
@@ -128,7 +178,13 @@ function coerceParam(definition, value) {
     }
     return raw;
   }
-  if (value === undefined || value === null) return definition.default ?? "";
+  if (value === undefined || value === null) {
+    const fallback = definition.default ?? "";
+    if (definition.required && String(fallback).trim() === "") {
+      throw new AutomationError("BAD_PARAM", `${label}不能为空`);
+    }
+    return fallback;
+  }
   if (typeof value !== "string") throw new AutomationError("BAD_PARAM", `${label}必须是文本`);
   const text = value.trim();
   const maxLength = definition.maxLength ?? 200;

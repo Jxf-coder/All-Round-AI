@@ -6,9 +6,10 @@ import test from "node:test";
 
 import { startLocalRuntime } from "../src/server.mjs";
 
-async function boot() {
+async function boot(options = {}) {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-automation-api-"));
   const runtime = await startLocalRuntime({
+    ...options,
     authProvider: async ({ user }) => ({
       ok: true,
       user: {
@@ -68,8 +69,8 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 1);
-    assert.equal(body.pipelines[0].id, "knowledge-brief");
+    assert.equal(body.pipelines.length, 2);
+    assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id), ["knowledge-brief", "script-draft"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -164,6 +165,66 @@ test("a knowledge run writes both artifacts and waits for the operator", async (
       ["auth.login", "ok"],
     ]);
     assert.equal(trail.entries[2].target, run.id);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the script pipeline drafts with the configured model and waits for review", async () => {
+  const calls = [];
+  const app = await boot({
+    automationChat: async ({ messages }) => {
+      calls.push(messages);
+      return { content: "镜头 1：先算一笔账。\n镜头 2：售后两小时响应。", model: "test-model" };
+    },
+  });
+  try {
+    const endpoint = `${app.runtime.url}/api/automation/runs`;
+    const missingTopic = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ pipelineId: "script-draft", projectId: app.projectId, params: { draft: {} } }),
+    });
+    assert.equal(missingTopic.status, 400);
+    assert.match((await missingTopic.json()).error, /主题不能为空/u);
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "script-draft",
+        projectId: app.projectId,
+        params: {
+          draft: { topic: "售后响应", audience: "boss", durationSec: 45, tone: "sharp", maxCards: 3 },
+        },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { run } = await response.json();
+    assert.equal(run.status, "waiting_manual");
+    assert.equal(run.steps.draft.status, "done");
+    assert.equal(run.steps.draft.artifacts[0].slot, "script");
+    assert.deepEqual(run.steps.draft.logs, ["引用已确认知识卡 0 张", "模型：test-model"]);
+
+    assert.equal(calls.length, 1);
+    assert.match(calls[0][1].content, /主题：售后响应/u);
+    assert.match(calls[0][1].content, /受众：企业老板/u);
+    assert.match(calls[0][1].content, /语气：直接犀利/u);
+
+    const artifact = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/script`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(artifact.text, /^# 口播脚本草稿/u);
+    assert.match(artifact.text, /镜头 1：先算一笔账。/u);
+    assert.match(artifact.text, /主题：售后响应/u);
+
+    const confirmed = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/steps/review/complete`,
+      { method: "POST", headers: app.admin, body: "{}" },
+    );
+    assert.equal(confirmed.status, 200);
+    assert.equal((await confirmed.json()).run.status, "done");
   } finally {
     await app.close();
   }

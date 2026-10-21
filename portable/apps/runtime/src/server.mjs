@@ -17,6 +17,7 @@ import { createDeviceChannel } from "./device-channel.mjs";
 import { createAuditLog } from "./audit.mjs";
 import { AUTOMATION_PIPELINES, createAutomationEngine, createAutomationStore, describePipeline } from "./automation.mjs";
 import { createKnowledgeBriefHandlers } from "./automation-knowledge.mjs";
+import { createScriptDraftHandler } from "./automation-ai.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
@@ -283,13 +284,26 @@ export async function startLocalRuntime(options = {}) {
   // Pipeline runs are persisted as snapshots; artifacts keep step output.
   const automationStore = options.automationStore
     ?? createAutomationStore({ filePath: path.join(directories.config, "automation-runs.json") });
+  const automationArtifacts = path.join(directories.data, "artifacts");
+  // AI-backed steps use whichever engine the installation already selected, so
+  // a local Ollama install works without a second model configuration.
+  const automationChat = options.automationChat ?? (async ({ messages }) => {
+    const { provider, model } = await resolveEngineModel();
+    return provider.chat({ model, messages });
+  });
   const automation = createAutomationEngine({
     store: automationStore,
-    handlers: options.automationHandlers
-      ?? createKnowledgeBriefHandlers({
+    handlers: options.automationHandlers ?? {
+      ...createKnowledgeBriefHandlers({
         knowledgeStore,
-        artifactsDir: path.join(directories.data, "artifacts"),
+        artifactsDir: automationArtifacts,
       }),
+      ...createScriptDraftHandler({
+        chat: automationChat,
+        knowledgeStore,
+        artifactsDir: automationArtifacts,
+      }),
+    },
   });
 
   // Every authenticated API shares the same gate: a valid session, and a
