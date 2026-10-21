@@ -1830,7 +1830,7 @@ function renderDeviceBody() {
   } else {
     const entries = Array.isArray(deviceAudit.entries) ? deviceAudit.entries : [];
     if (!entries.length) {
-      auditBlock.append(element("p", "knowledge-empty", "还没有设备命令记录。"));
+      auditBlock.append(element("p", "knowledge-empty", "还没有审计记录。"));
     } else {
       const auditList = element("ul", "device-audit");
       for (const entry of entries) {

@@ -96,6 +96,22 @@ export function createLocalAuth(options = {}) {
   const loginFailures = options.initialState?.loginFailures ?? new Map();
   const stateStore = options.stateStore ?? null;
   const onPersistError = options.onPersistError ?? null;
+  const onEvent = options.onEvent ?? null;
+  if (onEvent !== null && typeof onEvent !== "function") {
+    throw new TypeError("onEvent must be a function");
+  }
+  // Authentication events go to the audit trail. A broken listener must never
+  // make signing in impossible, so failures are swallowed here and reported by
+  // the runtime's own audit writer.
+  const emit = (event) => {
+    if (!onEvent) return;
+    try {
+      onEvent(event);
+    } catch {
+      // ignored on purpose
+    }
+  };
+  const describeUser = (value) => String(value).replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 120);
   const secureCookies = options.secureCookies === true;
   const allowedOrigins = Array.isArray(options.allowedOrigins) ? options.allowedOrigins : [];
   const originPolicy = {
@@ -230,6 +246,12 @@ export function createLocalAuth(options = {}) {
       const priorFailures = loginFailures.get(throttleKey) || [];
       if (priorFailures.length >= loginFailureLimit) {
         const retryAfterSeconds = Math.max(1, Math.ceil((priorFailures[0] + loginFailureWindowMs - attemptedAt) / 1000));
+        emit({
+          action: "auth.login",
+          actor: "anonymous",
+          outcome: "denied",
+          detail: `${describeUser(user)}：登录尝试过多`,
+        });
         json(response, 429, { error: "登录尝试过多，请稍后重试" }, { "retry-after": String(retryAfterSeconds) });
         return true;
       }
@@ -237,6 +259,12 @@ export function createLocalAuth(options = {}) {
       try {
         result = await provider({ user, password });
       } catch {
+        emit({
+          action: "auth.login",
+          actor: "anonymous",
+          outcome: "error",
+          detail: `${describeUser(user)}：认证服务暂时不可用`,
+        });
         json(response, 502, { error: "认证服务暂时不可用" });
         return true;
       }
@@ -254,6 +282,12 @@ export function createLocalAuth(options = {}) {
           pruneLoginFailures(attemptedAt);
           void persist();
         }
+        emit({
+          action: "auth.login",
+          actor: "anonymous",
+          outcome: status === 401 ? "denied" : "error",
+          detail: `${describeUser(user)}：${error || (status === 401 ? "账号或密码错误" : "认证服务暂时不可用")}`,
+        });
         json(response, status, { error: error || "账号或密码错误" });
         return true;
       }
@@ -265,6 +299,12 @@ export function createLocalAuth(options = {}) {
       loginFailures.delete(throttleKey);
       pruneSessions();
       if (sessions.size >= MAX_ACTIVE_SESSIONS) {
+        emit({
+          action: "auth.login",
+          actor: "anonymous",
+          outcome: "error",
+          detail: `${describeUser(user)}：登录会话已达到上限`,
+        });
         json(response, 503, { error: "当前登录会话较多，请稍后重试" });
         return true;
       }
@@ -278,6 +318,7 @@ export function createLocalAuth(options = {}) {
       });
       void persist();
       const guestOf = safeGuestOf(result.guestOf);
+      emit({ action: "auth.login", actor: identity.id, outcome: "ok", detail: `${describeUser(user)}：登录成功` });
       json(response, 200, {
         ok: true,
         user: identity,
@@ -312,10 +353,22 @@ export function createLocalAuth(options = {}) {
       const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
       const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
       if ([...newPassword].length < 12 || newPassword.length > 1024) {
+        emit({
+          action: "auth.change-password",
+          actor: currentSession.user.id,
+          outcome: "denied",
+          detail: "新密码长度必须为 12 至 1024 个字符",
+        });
         json(response, 400, { error: "新密码长度必须为 12 至 1024 个字符" });
         return true;
       }
       if (typeof provider?.changePassword !== "function") {
+        emit({
+          action: "auth.change-password",
+          actor: currentSession.user.id,
+          outcome: "error",
+          detail: "当前认证服务不支持修改密码",
+        });
         json(response, 503, { error: "当前认证服务不支持修改密码" });
         return true;
       }
@@ -323,6 +376,12 @@ export function createLocalAuth(options = {}) {
       try {
         result = await provider.changePassword(currentSession.user.id, currentPassword, newPassword);
       } catch {
+        emit({
+          action: "auth.change-password",
+          actor: currentSession.user.id,
+          outcome: "error",
+          detail: "密码暂时无法更新",
+        });
         json(response, 502, { error: "密码暂时无法更新，请稍后重试" });
         return true;
       }
@@ -331,11 +390,23 @@ export function createLocalAuth(options = {}) {
         const message = result?.reason === "same" ? "新密码不能与当前密码相同"
           : result?.reason === "invalid" ? "密码格式无效"
             : "当前密码错误";
+        emit({
+          action: "auth.change-password",
+          actor: currentSession.user.id,
+          outcome: "denied",
+          detail: message,
+        });
         json(response, status, { error: message });
         return true;
       }
       const identity = safeUser(result.user);
       if (!identity) {
+        emit({
+          action: "auth.change-password",
+          actor: currentSession.user.id,
+          outcome: "error",
+          detail: "账户服务返回格式异常",
+        });
         json(response, 502, { error: "账户服务返回格式异常" });
         return true;
       }
@@ -349,6 +420,12 @@ export function createLocalAuth(options = {}) {
         expiresAt: Date.now() + sessionTtlMs,
       });
       void persist();
+      emit({
+        action: "auth.change-password",
+        actor: identity.id,
+        outcome: "ok",
+        detail: "密码已更新，其他会话全部失效",
+      });
       json(response, 200, { ok: true, user: identity }, {
         "set-cookie": COOKIE + "=" + id + "; " + cookieAttributes,
       });

@@ -334,3 +334,77 @@ test("a logged-out session stays logged out after a restart", async () => {
     assert.equal(whoami.status, 401);
   });
 });
+
+test("sign-ins and password changes land in the audit trail", async () => {
+  const entries = [];
+  const identity = { id: "audit-user", name: "Audit User", role: "admin", source: "all-round-ai" };
+  const authProvider = Object.assign(async ({ password }) => (
+    password === "test-only-password"
+      ? { ok: true, user: identity }
+      : { ok: false, status: 401 }
+  ), {
+    changePassword: async (id, currentPassword) => (
+      currentPassword === "test-only-password"
+        ? { ok: true, user: { ...identity, id } }
+        : { ok: false }
+    ),
+  });
+  const auditLog = {
+    append: async (entry) => {
+      entries.push(entry);
+    },
+    list: async () => ({ entries: [], total: 0, skipped: 0 }),
+  };
+  await withRuntime({ authProvider, auditLog }, async (runtime) => {
+    const headers = { "content-type": "application/json", origin: runtime.url };
+    await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ user: "audit@example.test", password: "wrong-password" }),
+    });
+    const accepted = await fetch(`${runtime.url}/api/auth/login`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ user: " audit@example.test ", password: "test-only-password" }),
+    });
+    assert.equal(accepted.status, 200);
+    const cookie = accepted.headers.get("set-cookie").split(";")[0];
+
+    const wrongCurrent = await fetch(`${runtime.url}/api/auth/change-password`, {
+      method: "POST",
+      headers: { ...headers, cookie },
+      body: JSON.stringify({ currentPassword: "nope", newPassword: "brand-new-password" }),
+    });
+    assert.equal(wrongCurrent.status, 401);
+    const tooShort = await fetch(`${runtime.url}/api/auth/change-password`, {
+      method: "POST",
+      headers: { ...headers, cookie },
+      body: JSON.stringify({ currentPassword: "test-only-password", newPassword: "short" }),
+    });
+    assert.equal(tooShort.status, 400);
+    const changed = await fetch(`${runtime.url}/api/auth/change-password`, {
+      method: "POST",
+      headers: { ...headers, cookie },
+      body: JSON.stringify({ currentPassword: "test-only-password", newPassword: "brand-new-password" }),
+    });
+    assert.equal(changed.status, 200);
+
+    assert.deepEqual(entries.map((entry) => [entry.action, entry.outcome]), [
+      ["auth.login", "denied"],
+      ["auth.login", "ok"],
+      ["auth.change-password", "denied"],
+      ["auth.change-password", "denied"],
+      ["auth.change-password", "ok"],
+    ]);
+    assert.equal(entries[0].actor, "anonymous");
+    assert.match(entries[0].detail, /audit@example\.test：账号或密码错误/u);
+    assert.equal(entries[1].actor, "audit-user");
+    assert.equal(entries[4].actor, "audit-user");
+    assert.match(entries[3].detail, /12 至 1024/u);
+    assert.match(entries[4].detail, /密码已更新/u);
+    // Neither the old nor the new password may reach the trail.
+    const trail = JSON.stringify(entries);
+    assert.equal(trail.includes("test-only-password"), false);
+    assert.equal(trail.includes("brand-new-password"), false);
+  });
+});

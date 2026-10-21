@@ -195,6 +195,11 @@ export async function startLocalRuntime(options = {}) {
     onPersistError: (error) => {
       void logger.warn("Auth state could not be written", { message: error.message });
     },
+    // Sign-ins and password changes are privileged events too, so they land in
+    // the same trail as device commands.
+    onEvent: (event) => {
+      void recordAudit(event);
+    },
   });
   // Engines are providers. The registry keeps the switch honest: the default
   // provider owns the installation-wide model setting, while any additional
