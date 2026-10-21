@@ -249,6 +249,25 @@ html.dark .fast-toggle.active{background:rgba(108,132,255,.2);border-color:rgba(
 .device-file-text.error{color:#d93b34}
 .device-process{display:flex;flex-direction:column;gap:6px;padding-top:7px;border-top:1px dashed var(--hairline)}
 .device-screen{display:block;max-width:100%;border:1px solid var(--hairline);border-radius:8px;background:#fff}
+.automation-pipeline,.automation-run{display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid var(--hairline);border-radius:8px;background:#ffffffb8}
+.automation-pipeline-head,.automation-run-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.automation-run-head{justify-content:flex-start}
+.automation-pipeline-head b,.automation-run-head b{font-size:11px;color:#2f3f57}
+.automation-steps{display:flex;flex-wrap:wrap;gap:4px;margin:0;padding:0;list-style:none;counter-reset:step}
+.automation-steps li{counter-increment:step;padding:1px 7px;border-radius:999px;background:#eef1f6;color:#4c5b70;font-size:9px}
+.automation-steps li::before{content:counter(step) ". "}
+.automation-steps li.runner-manual{background:#fff5e6;color:#b26a00}
+.automation-status{padding:1px 6px;border-radius:999px;background:#eef1f6;color:#7d8a9e;font-size:9px}
+.automation-status.running{background:#e8f1ff;color:#2f6fdd}
+.automation-status.waiting_manual{background:#fff5e6;color:#b26a00}
+.automation-status.done{background:#e7f8f0;color:#1d9b6c}
+.automation-status.failed{background:#fdeceb;color:#d93b34}
+.automation-status.skipped{background:#f1f2f5;color:#98a3b3}
+.automation-step-list{margin:0;padding:0;display:flex;flex-direction:column;gap:4px;list-style:none}
+.automation-step{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:#4c5b70}
+.automation-step-name{font-size:10px;color:#2f3f57}
+.automation-step .device-error{font-size:9px}
+.automation-step .knowledge-action{font-size:9px;padding:1px 6px}
 .device-audit{margin:0;padding:0;display:flex;flex-direction:column;gap:6px;list-style:none}
 .device-audit li{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;padding:6px 8px;border:1px solid var(--hairline);border-radius:8px;background:#ffffffb8}
 .device-audit-outcome{justify-self:start;padding:1px 6px;border-radius:999px;background:#eef1f6;color:#7d8a9e;font-size:9px}
@@ -270,3 +289,13 @@ html.dark .device-audit li{background:#101d30b8;border-color:var(--hairline)}
 html.dark .device-file-text.error{color:#ff8a80}
 html.dark .device-audit-main{color:#d0def8a8}
 html.dark .device-audit-time{color:#d0def86b}
+html.dark .automation-pipeline,html.dark .automation-run{background:#101d30b8;border-color:var(--hairline)}
+html.dark .automation-pipeline-head b,html.dark .automation-run-head b,html.dark .automation-step-name{color:#dce4ff}
+html.dark .automation-steps li{background:#ffffff14;color:#d0def8a8}
+html.dark .automation-steps li.runner-manual{background:#3a2c12;color:#f3c07a}
+html.dark .automation-status{background:#ffffff14;color:#d0def8a8}
+html.dark .automation-status.running{background:#122f5a;color:#8fc0ff}
+html.dark .automation-status.waiting_manual{background:#3a2c12;color:#f3c07a}
+html.dark .automation-status.done{background:#123a2b;color:#5fe0aa}
+html.dark .automation-status.failed{background:#3d1b1b;color:#ff8a80}
+html.dark .automation-step{color:#d0def8a8}

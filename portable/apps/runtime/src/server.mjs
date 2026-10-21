@@ -15,6 +15,8 @@ import { createConversationStore } from "./conversations.mjs";
 import { createDeviceRegistry, readDeviceToken } from "./devices.mjs";
 import { createDeviceChannel } from "./device-channel.mjs";
 import { createAuditLog } from "./audit.mjs";
+import { AUTOMATION_PIPELINES, createAutomationEngine, createAutomationStore, describePipeline } from "./automation.mjs";
+import { createKnowledgeBriefHandlers } from "./automation-knowledge.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
@@ -277,6 +279,18 @@ export async function startLocalRuntime(options = {}) {
       void logger.warn("Audit entry could not be written", { message: error.message });
     }
   }
+
+  // Pipeline runs are persisted as snapshots; artifacts keep step output.
+  const automationStore = options.automationStore
+    ?? createAutomationStore({ filePath: path.join(directories.config, "automation-runs.json") });
+  const automation = createAutomationEngine({
+    store: automationStore,
+    handlers: options.automationHandlers
+      ?? createKnowledgeBriefHandlers({
+        knowledgeStore,
+        artifactsDir: path.join(directories.data, "artifacts"),
+      }),
+  });
 
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
@@ -731,6 +745,148 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, 200, { removed: true });
     } catch (error) {
       json(ctx.response, error.status || 400, { error: error.message || "移除失败" });
+    }
+    return true;
+  });
+
+  // Automation runs: a pipeline is a frozen step list, a run is its snapshot.
+  // Starting, confirming and cancelling are privileged enough to be audited.
+  async function automationFailure(ctx, actor, action, target, error) {
+    const status = error.status || 400;
+    await recordAudit({
+      actor: actor?.id ?? "anonymous",
+      action,
+      target: target ?? null,
+      outcome: status >= 500 ? "error" : "denied",
+      detail: error.message || "自动化执行失败",
+    });
+    json(ctx.response, status, { error: error.message || "自动化执行失败" });
+  }
+
+  router.get("/api/automation", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    json(ctx.response, 200, {
+      pipelines: AUTOMATION_PIPELINES.map(describePipeline),
+      runs: await automation.list(),
+    });
+    return true;
+  });
+
+  router.post("/api/automation/runs", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    try {
+      const body = await readJsonBody(ctx.request, { maxBytes: 16 * 1024 });
+      const projectId = typeof body.projectId === "string" ? body.projectId.trim() : "";
+      // Runs read project-scoped knowledge, so a typo must fail here instead of
+      // producing an empty brief for a project that does not exist.
+      if (!projectId || !(await projectStore.get(projectId))) {
+        await automationFailure(ctx, actor, "automation.run", null, { status: 404, message: "项目不存在" });
+        return true;
+      }
+      const run = await automation.start({
+        pipelineId: body.pipelineId,
+        projectId,
+        actor: actor.id,
+      });
+      await recordAudit({
+        actor: actor.id,
+        action: "automation.run",
+        target: run.id,
+        outcome: "ok",
+        detail: `${run.pipelineId} · ${run.projectId}`,
+      });
+      json(ctx.response, 201, { run });
+    } catch (error) {
+      await automationFailure(ctx, actor, "automation.run", null, error);
+    }
+    return true;
+  });
+
+  router.get("/api/automation/runs/:id", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const run = await automation.read(ctx.params.id);
+    if (!run) {
+      json(ctx.response, 404, { error: "运行不存在" });
+      return true;
+    }
+    json(ctx.response, 200, { run });
+    return true;
+  });
+
+  // Artifacts are text written by a local handler; the read stays under a
+  // strict size cap so a broken handler cannot stream a huge file back.
+  router.get("/api/automation/runs/:id/artifacts/:slot", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const run = await automation.read(ctx.params.id);
+    if (!run) {
+      json(ctx.response, 404, { error: "运行不存在" });
+      return true;
+    }
+    const artifact = Object.values(run.steps)
+      .flatMap((state) => state.artifacts)
+      .find((entry) => entry.slot === ctx.params.slot);
+    if (!artifact) {
+      json(ctx.response, 404, { error: "这一步没有这个产物" });
+      return true;
+    }
+    try {
+      const text = await readFile(artifact.path, "utf8");
+      if (Buffer.byteLength(text, "utf8") > 256 * 1024) {
+        json(ctx.response, 413, { error: "产物超过 256 KB，请在服务器上直接查看" });
+        return true;
+      }
+      json(ctx.response, 200, {
+        slot: artifact.slot,
+        label: artifact.label,
+        path: artifact.path,
+        bytes: artifact.bytes ?? Buffer.byteLength(text, "utf8"),
+        text,
+      });
+    } catch {
+      json(ctx.response, 404, { error: "产物文件已不存在" });
+    }
+    return true;
+  });
+
+  router.post("/api/automation/runs/:id/steps/:stepId/complete", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    try {
+      const run = await automation.completeManual({
+        runId: ctx.params.id,
+        stepId: ctx.params.stepId,
+        actor: actor.id,
+      });
+      await recordAudit({
+        actor: actor.id,
+        action: "automation.complete",
+        target: run.id,
+        outcome: "ok",
+        detail: `人工确认 ${ctx.params.stepId}`,
+      });
+      json(ctx.response, 200, { run });
+    } catch (error) {
+      await automationFailure(ctx, actor, "automation.complete", ctx.params.id, error);
+    }
+    return true;
+  });
+
+  router.post("/api/automation/runs/:id/cancel", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    try {
+      const run = await automation.cancel({ runId: ctx.params.id });
+      await recordAudit({
+        actor: actor.id,
+        action: "automation.cancel",
+        target: run.id,
+        outcome: "ok",
+        detail: run.pipelineId,
+      });
+      json(ctx.response, 200, { run });
+    } catch (error) {
+      await automationFailure(ctx, actor, "automation.cancel", ctx.params.id, error);
     }
     return true;
   });
@@ -1708,6 +1864,14 @@ export async function startLocalRuntime(options = {}) {
     json(ctx.response, removed ? 200 : 404, removed ? { ok: true } : { error: "对话不存在" });
     return true;
   });
+
+  // A run interrupted by a restart has no one to push it forward, so it is
+  // re-driven before the listener opens. Manual waits are durable and left
+  // exactly as they were.
+  const resumedAutomation = await automation.resumeInterrupted();
+  if (resumedAutomation.resumed || resumedAutomation.failed) {
+    await logger.info("Automation runs resumed", resumedAutomation);
+  }
 
   const server = createServer((request, response) => {
     void (async () => {

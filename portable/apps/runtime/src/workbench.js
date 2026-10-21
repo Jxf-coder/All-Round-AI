@@ -722,6 +722,7 @@ async function selectProject(id) {
     return;
   }
   if (activePanel === "database") await refreshKnowledge();
+  if (activePanel === "automation") await refreshAutomation();
 }
 
 // ---------------------------------------------------------------------------
@@ -2082,6 +2083,199 @@ async function refreshKnowledge() {
   renderKnowledgeBody();
 }
 
+// ---------------------------------------------------------------------------
+// Automation panel: pipelines run step by step; a manual step stops the run
+// until the operator confirms it. Artifacts are text and render inline.
+// ---------------------------------------------------------------------------
+let automationState = null;
+let automationArtifact = null;
+let automationError = null;
+
+const RUN_STATUS_LABELS = {
+  running: "执行中",
+  waiting_manual: "等待人工",
+  done: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+const STEP_STATUS_LABELS = {
+  pending: "待执行",
+  running: "执行中",
+  waiting_manual: "等待人工",
+  done: "已完成",
+  failed: "失败",
+  skipped: "已跳过",
+};
+
+async function refreshAutomation() {
+  automationState = { ...(automationState ?? {}), busy: false };
+  try {
+    const response = await apiRequest("/api/automation");
+    const body = await response?.json().catch(() => null);
+    automationState = response?.ok
+      ? { pipelines: body?.pipelines ?? [], runs: body?.runs ?? [] }
+      : { pipelines: [], runs: [], error: body?.error || "读取自动化列表失败。" };
+  } catch {
+    automationState = { pipelines: [], runs: [], error: "连不上运行时，稍后再试。" };
+  }
+  renderAutomationBody();
+}
+
+async function automationAction(path, payload) {
+  automationError = null;
+  automationState = { ...(automationState ?? {}), busy: true };
+  renderAutomationBody();
+  try {
+    const response = await apiRequest(path, { method: "POST", body: JSON.stringify(payload ?? {}) });
+    const body = await response?.json().catch(() => null);
+    if (!response?.ok) automationError = body?.error || "操作失败。";
+  } catch {
+    automationError = "连不上运行时，稍后再试。";
+  }
+  await refreshAutomation();
+}
+
+async function openAutomationArtifact(runId, slot) {
+  automationError = null;
+  try {
+    const response = await apiRequest(
+      `/api/automation/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(slot)}`,
+    );
+    const body = await response?.json().catch(() => null);
+    if (response?.ok) {
+      automationArtifact = { runId, slot, ...body };
+    } else {
+      automationError = body?.error || "读取产物失败。";
+    }
+  } catch {
+    automationError = "连不上运行时，稍后再试。";
+  }
+  renderAutomationBody();
+}
+
+function automationBadge(status, labels) {
+  return element("span", `automation-status ${status}`, labels[status] ?? status);
+}
+
+function automationPipelineName(state, id) {
+  return (state.pipelines ?? []).find((pipeline) => pipeline.id === id)?.name ?? id;
+}
+
+function renderAutomationBody() {
+  panelBody.replaceChildren();
+  const state = automationState;
+  if (!state) {
+    panelBody.append(element("p", "panel-note", "正在读取自动化产线…"));
+    return;
+  }
+  if (state.error) panelBody.append(element("p", "device-error", state.error));
+  if (automationError) panelBody.append(element("p", "device-error", automationError));
+
+  const pipelinesBlock = element("section", "device-block");
+  const pipesHead = element("div", "device-block-head");
+  pipesHead.append(element("h3", null, "产线"));
+  pipesHead.append(actionButton("刷新", () => void refreshAutomation()));
+  pipelinesBlock.append(pipesHead);
+  const pipelines = Array.isArray(state.pipelines) ? state.pipelines : [];
+  if (!pipelines.length) pipelinesBlock.append(element("p", "panel-note", "没有可用的产线。"));
+  for (const pipeline of pipelines) {
+    const card = element("div", "automation-pipeline");
+    const head = element("div", "automation-pipeline-head");
+    head.append(element("b", null, pipeline.name));
+    const start = actionButton(
+      `用「${projectNameOf(currentProjectId)}」开始`,
+      () => void automationAction("/api/automation/runs", {
+        pipelineId: pipeline.id,
+        projectId: currentProjectId,
+      }),
+    );
+    if (!currentProjectId || state.busy) start.disabled = true;
+    head.append(start);
+    card.append(head);
+    if (pipeline.desc) card.append(element("p", "panel-note", pipeline.desc));
+    const steps = element("ol", "automation-steps");
+    for (const step of pipeline.steps) {
+      const item = element("li", `runner-${step.runner}`);
+      item.textContent = step.runner === "manual" ? `${step.name}（人工）` : `${step.name}（本机）`;
+      if (step.manualHint) item.title = step.manualHint;
+      steps.append(item);
+    }
+    card.append(steps);
+    pipelinesBlock.append(card);
+  }
+  panelBody.append(pipelinesBlock);
+
+  const runsBlock = element("section", "device-block");
+  const runsHead = element("div", "device-block-head");
+  runsHead.append(element("h3", null, "最近运行"));
+  runsBlock.append(runsHead);
+  const runs = Array.isArray(state.runs) ? state.runs : [];
+  if (!runs.length) runsBlock.append(element("p", "panel-note", "还没有运行记录。"));
+  for (const run of runs.slice(0, 6)) {
+    const card = element("article", "automation-run");
+    const head = element("div", "automation-run-head");
+    head.append(automationBadge(run.status, RUN_STATUS_LABELS));
+    head.append(element("b", null, automationPipelineName(state, run.pipelineId)));
+    head.append(element("span", "device-meta", `${run.projectId} · ${deviceTime(run.createdAt)}`));
+    card.append(head);
+
+    const list = element("ul", "automation-step-list");
+    for (const step of run.definition?.steps ?? []) {
+      const stepState = run.steps?.[step.id] ?? { status: "pending" };
+      const row = element("li", "automation-step");
+      row.append(automationBadge(stepState.status, STEP_STATUS_LABELS));
+      row.append(element("span", "automation-step-name", step.name));
+      if (stepState.error) row.append(element("span", "device-error", stepState.error));
+      for (const artifact of stepState.artifacts ?? []) {
+        row.append(actionButton(
+          `查看${artifact.label || artifact.slot}`,
+          () => void openAutomationArtifact(run.id, artifact.slot),
+        ));
+      }
+      if (stepState.status === "waiting_manual") {
+        row.append(actionButton(
+          "我做完了",
+          () => void automationAction(
+            `/api/automation/runs/${encodeURIComponent(run.id)}/steps/${encodeURIComponent(step.id)}/complete`,
+            {},
+          ),
+        ));
+      }
+      list.append(row);
+    }
+    card.append(list);
+    if (run.error) card.append(element("p", "device-error", run.error));
+    if (run.status === "running" || run.status === "waiting_manual") {
+      const actions = element("div", "device-actions");
+      const cancel = actionButton(
+        "取消运行",
+        () => void automationAction(`/api/automation/runs/${encodeURIComponent(run.id)}/cancel`, {}),
+      );
+      if (state.busy) cancel.disabled = true;
+      actions.append(cancel);
+      card.append(actions);
+    }
+    runsBlock.append(card);
+  }
+  panelBody.append(runsBlock);
+
+  if (automationArtifact) {
+    const block = element("section", "device-block");
+    const head = element("div", "device-block-head");
+    head.append(element("h3", null, `产物 · ${automationArtifact.label || automationArtifact.slot}`));
+    head.append(actionButton("收起", () => {
+      automationArtifact = null;
+      renderAutomationBody();
+    }));
+    block.append(head);
+    block.append(element("p", "device-meta", automationArtifact.path || ""));
+    const pre = element("pre", "device-file-text");
+    pre.textContent = automationArtifact.text ?? "";
+    block.append(pre);
+    panelBody.append(block);
+  }
+}
+
 function renderPlaceholderPanel(label) {
   knowledgeState = null;
   panelBody.replaceChildren(element("p", "panel-note",
@@ -2176,6 +2370,15 @@ function showPanelView(panel, label) {
     knowledgeState = null;
     renderKnowledgeBody();
     void refreshKnowledge();
+    return;
+  }
+  if (panel === "automation") {
+    panelCopy.textContent = "产线按步骤执行：本机步骤自动完成，人工步骤需要你确认后才会继续；运行记录与产物都留在本地。";
+    automationState = null;
+    automationArtifact = null;
+    automationError = null;
+    renderAutomationBody();
+    void refreshAutomation();
     return;
   }
   panelCopy.textContent = "";
