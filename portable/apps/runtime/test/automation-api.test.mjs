@@ -70,9 +70,9 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 5);
+    assert.equal(body.pipelines.length, 6);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
-      ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory"]);
+      ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory", "audio-extract"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -441,6 +441,89 @@ test("media tools are reported and the inventory pipeline scans an allowed root"
     const failed = (await outside.json()).run;
     assert.equal(failed.status, "failed");
     assert.match(failed.error, /白名单/u);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the audio pipeline transcodes an allowed source and serves the binary artifact", async () => {
+  const app = await boot({
+    mediaProbe: async () => ({
+      ffmpeg: { available: true, path: "ffmpeg", version: "test", reason: "" },
+      ffprobe: { available: true, path: "ffprobe", version: "test", reason: "" },
+      checkedAt: "2026-10-21T00:00:00.000Z",
+    }),
+    mediaRun: async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { format_name: "mov,mp4", duration: "12.5", size: "4096" },
+            streams: [{ codec_type: "audio", codec_name: "aac", sample_rate: "44100", channels: 1 }],
+          }),
+          stderr: "",
+        };
+      }
+      await writeFile(args[args.length - 1], Buffer.alloc(2048, 5));
+      return { stdout: "", stderr: "" };
+    },
+  });
+  try {
+    const mediaDir = path.join(app.root, "audio-source");
+    await mkdir(mediaDir, { recursive: true });
+    const source = path.join(mediaDir, "clip.mp4");
+    await writeFile(source, Buffer.alloc(4096, 1));
+    const saved = await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+    assert.equal(saved.status, 200);
+
+    assert.equal(
+      (await fetch(`${app.runtime.url}/api/automation/runs/run_x/artifacts/audio/download`)).status,
+      401,
+    );
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "audio-extract",
+        projectId: app.projectId,
+        params: { extract: { source, format: "wav" } },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { run } = await response.json();
+    assert.equal(run.status, "waiting_manual");
+    assert.equal(run.steps.extract.status, "done");
+    assert.equal(run.steps.extract.artifacts[0].slot, "audio");
+    assert.match(run.steps.extract.artifacts[0].path, /audio\.wav$/u);
+    assert.equal(run.steps.extract.artifacts[0].bytes, 2048);
+    assert.equal(run.steps.extract.logs[0], "源文件：clip.mp4");
+
+    const download = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/audio/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get("content-type"), "audio/wav");
+    assert.match(download.headers.get("content-disposition"), /attachment; filename="audio\.wav"/u);
+    assert.equal((await download.arrayBuffer()).byteLength, 2048);
+
+    const outside = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "audio-extract",
+        projectId: app.projectId,
+        params: { extract: { source: path.join(app.root, "missing.mp4"), format: "m4a" } },
+      }),
+    });
+    assert.equal(outside.status, 201);
+    const failed = (await outside.json()).run;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /不存在|白名单/u);
   } finally {
     await app.close();
   }

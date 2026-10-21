@@ -105,6 +105,17 @@ export const SKILLS = Object.freeze([
     hint: "不调用 FFmpeg，未安装也能用；只读取「来源配置」允许的目录。",
   },
   {
+    id: "audio-extract",
+    name: "音频提取",
+    category: "production",
+    icon: "♪",
+    runner: "app",
+    pipelineId: "audio-extract",
+    requiresMedia: "ffmpeg",
+    desc: "从白名单内的视频或音频文件提取一条音频轨，输出 M4A、MP3 或 WAV。",
+    hint: "需要 FFmpeg/ffprobe；没有音频轨的文件会直接失败。",
+  },
+  {
     id: "media-render",
     name: "影音成片",
     category: "production",
@@ -201,12 +212,24 @@ function assertDocument(value) {
   return value;
 }
 
-function describeAvailability(skill, devices) {
+function describeAvailability(skill, devices, media) {
   if (skill.comingSoon) {
     return {
       available: false,
       reason: "这项能力还在迁移中，当前版本不能启用。",
       howTo: "阶段 4 的后续批次会随产线一起开放。",
+      devices: 0,
+      online: 0,
+    };
+  }
+  if (skill.requiresMedia === "ffmpeg") {
+    if (media?.ffmpeg?.available) {
+      return { available: true, reason: "", howTo: "", devices: 0, online: 0 };
+    }
+    return {
+      available: false,
+      reason: `未检测到 FFmpeg（${media?.ffmpeg?.reason || "未安装，或不在 PATH 里"}）。`,
+      howTo: "安装 FFmpeg 并加入 PATH，或设置 FFMPEG_PATH / FFPROBE_PATH。",
       devices: 0,
       online: 0,
     };
@@ -238,8 +261,8 @@ function describeAvailability(skill, devices) {
   };
 }
 
-function describeSkill(skill, disabled, devices) {
-  const availability = describeAvailability(skill, devices);
+function describeSkill(skill, disabled, devices, media) {
+  const availability = describeAvailability(skill, devices, media);
   return {
     id: skill.id,
     name: skill.name,
@@ -270,10 +293,11 @@ export async function createSkillStore(filePath) {
 
   return Object.freeze({
     path: store.path,
-    async list(devices = []) {
+    async list(devices = [], options = {}) {
       if (!Array.isArray(devices)) throw new TypeError("devices must be an array");
+      const media = options.media ?? null;
       const disabled = await disabledSet();
-      const skills = SKILLS.map((skill) => describeSkill(skill, disabled, devices));
+      const skills = SKILLS.map((skill) => describeSkill(skill, disabled, devices, media));
       return {
         categories: SKILL_CATEGORIES.map((category) => ({ ...category })),
         skills,

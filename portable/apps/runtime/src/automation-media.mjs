@@ -1,7 +1,8 @@
-import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { resolveScoutRoot } from "./sources.mjs";
+import { probeMediaFile, runMediaTool } from "./media-tools.mjs";
+import { resolveAllowedFile, resolveScoutRoot } from "./sources.mjs";
 
 // ---------------------------------------------------------------------------
 // Media inventory. This is the part of the media pipeline that needs no FFmpeg:
@@ -194,6 +195,131 @@ export function createMediaInventoryHandler({ sourceStore, artifactsDir }) {
         logs: [
           `扫描 ${scan.counts.files} 个文件，保留 ${scan.files.length} 个媒体文件`,
           `合计 ${formatSize(scan.totalBytes)}${scan.truncated ? "（结果已截断）" : ""}`,
+        ],
+      };
+    },
+  });
+}
+
+export const AUDIO_FORMATS = Object.freeze({
+  m4a: {
+    label: "M4A (AAC 192k)",
+    extension: "m4a",
+    codec: ["-c:a", "aac", "-b:a", "192k"],
+  },
+  mp3: {
+    label: "MP3 (LAME 192k)",
+    extension: "mp3",
+    codec: ["-c:a", "libmp3lame", "-b:a", "192k"],
+  },
+  wav: {
+    label: "WAV (PCM 16-bit)",
+    extension: "wav",
+    codec: ["-c:a", "pcm_s16le"],
+  },
+});
+
+function safeRunName(runId) {
+  return String(runId).replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 80) || "run";
+}
+
+function durationText(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "未知";
+  const total = Math.round(seconds);
+  const minutes = Math.floor(total / 60);
+  return `${minutes}:${String(total % 60).padStart(2, "0")}`;
+}
+
+// Audio extraction is the first pipeline that really invokes FFmpeg. It probes
+// the source first, refuses files without an audio track, and removes a partial
+// output when the encoder fails so the run never points at a broken artifact.
+export function createAudioExtractHandler({
+  sourceStore,
+  artifactsDir,
+  mediaProbe,
+  runner,
+} = {}) {
+  if (!sourceStore || typeof sourceStore.list !== "function") {
+    throw new TypeError("音频提取需要来源配置");
+  }
+  if (typeof artifactsDir !== "string" || !path.isAbsolute(artifactsDir)) {
+    throw new TypeError("产物目录必须是绝对路径");
+  }
+  if (typeof mediaProbe !== "function") throw new TypeError("音频提取需要媒体工具探测");
+
+  return Object.freeze({
+    "media.extract-audio": async ({ run, params }) => {
+      const tools = await mediaProbe();
+      if (!tools?.ffmpeg?.available || !tools?.ffprobe?.available) {
+        throw new Error("未检测到 FFmpeg/ffprobe，请安装后重试（或设置 FFMPEG_PATH/FFPROBE_PATH）");
+      }
+      const format = AUDIO_FORMATS[params.format];
+      if (!format) throw new Error("音频格式无效");
+      const roots = (await sourceStore.list()).roots;
+      const source = await resolveAllowedFile(params.source, roots);
+
+      let media;
+      try {
+        media = await probeMediaFile({
+          ffprobePath: tools.ffprobe.path,
+          filePath: source,
+          runner,
+        });
+      } catch (error) {
+        throw new Error(`无法读取媒体信息：${error.message}`);
+      }
+      if (!media.audio) throw new Error("源文件没有音频轨");
+
+      const directory = path.join(artifactsDir, safeRunName(run.id));
+      await mkdir(directory, { recursive: true });
+      const file = path.join(directory, `audio.${format.extension}`);
+      const timeoutMs = media.duration
+        ? Math.min(Math.max(Math.ceil(media.duration * 3_000), 60_000), 900_000)
+        : 300_000;
+      const args = [
+        "-hide_banner", "-nostdin", "-y",
+        "-i", source,
+        "-vn", "-map", "0:a:0",
+        ...format.codec,
+        file,
+      ];
+      try {
+        await runMediaTool({
+          command: tools.ffmpeg.path,
+          args,
+          timeoutMs,
+          runner,
+        });
+      } catch (error) {
+        await rm(file, { force: true }).catch(() => {});
+        const detail = String(error?.message ?? "未知错误").split(/\r?\n/u)[0].slice(0, 300);
+        throw new Error(`音频提取失败：${detail}`);
+      }
+
+      let output;
+      try {
+        output = await stat(file);
+      } catch {
+        throw new Error("音频提取失败：没有生成输出文件");
+      }
+      if (!output.isFile() || output.size === 0) {
+        await rm(file, { force: true }).catch(() => {});
+        throw new Error("音频提取失败：输出文件为空");
+      }
+
+      const audio = media.audio;
+      return {
+        artifacts: [{
+          slot: "audio",
+          label: `音频（${format.label}）`,
+          path: file,
+          bytes: output.size,
+        }],
+        logs: [
+          `源文件：${path.basename(source)}`,
+          `时长：${durationText(media.duration)}；音频：${audio.codec || "未知"} / `
+            + `${audio.sampleRate ?? "?"} Hz / ${audio.channels ?? "?"} 声道`,
+          `${format.label}，${formatSize(output.size)}`,
         ],
       };
     },

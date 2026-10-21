@@ -30,6 +30,12 @@ async function boot() {
     env: { ALLROUND_AI_DATA_DIR: path.join(temporaryRoot, "data") },
     home: temporaryRoot,
     port: 0,
+    // Keep the counts deterministic: the host may or may not have FFmpeg.
+    mediaProbe: async () => ({
+      ffmpeg: { available: false, path: null, version: null, reason: "测试环境未安装" },
+      ffprobe: { available: false, path: null, version: null, reason: "测试环境未安装" },
+      checkedAt: new Date(0).toISOString(),
+    }),
   });
 
   async function login(user) {
@@ -107,8 +113,8 @@ test("the catalog is readable by any session and reports missing desk capability
     });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(body.skills.length, 14);
-    assert.equal(body.stats.enabled, 10);
+    assert.equal(body.skills.length, 15);
+    assert.equal(body.stats.enabled, 11);
     assert.equal(body.stats.available, 7);
     assert.equal(body.stats.comingSoon, 4);
 
@@ -118,6 +124,10 @@ test("the catalog is readable by any session and reports missing desk capability
     const later = body.skills.find((skill) => skill.id === "doc-rewrite");
     assert.equal(later.comingSoon, true);
     assert.equal(later.enabled, false);
+    const audio = body.skills.find((skill) => skill.id === "audio-extract");
+    assert.equal(audio.enabled, true);
+    assert.equal(audio.available, false);
+    assert.match(audio.reason, /FFmpeg/u);
 
     const { device } = await app.pairDevice(["files", "screen"]);
     assert.ok(device.id);
@@ -154,7 +164,7 @@ test("only an administrator can flip a switch and every attempt is audited", asy
     assert.equal(off.status, 200);
     const listed = await off.json();
     assert.equal(listed.skills.find((skill) => skill.id === "local-screen").enabled, false);
-    assert.equal(listed.stats.enabled, 9);
+    assert.equal(listed.stats.enabled, 10);
 
     const audit = await (await fetch(`${app.runtime.url}/api/audit?limit=100`, {
       headers: { cookie: app.admin.cookie },

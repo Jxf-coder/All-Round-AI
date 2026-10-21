@@ -155,6 +155,7 @@ html.dark .memory-pending-item{background:#0f1a2c}
 .knowledge-card-actions{display:flex;flex-wrap:wrap;gap:6px}
 .knowledge-action{padding:3px 8px;border:1px solid var(--hairline);border-radius:7px;background:transparent;color:#8290a1;font-family:inherit;font-size:10px;cursor:pointer}
 .knowledge-action:hover{background:var(--chip);color:var(--ink)}
+a.knowledge-action{display:inline-flex;align-items:center;text-decoration:none}
 .knowledge-form{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px dashed var(--hairline);border-radius:10px;background:#ffffff8c}
 .knowledge-field{padding:7px 9px;border:1px solid var(--hairline);border-radius:8px;background:#fff;color:var(--ink);font-family:inherit;font-size:11px}
 .knowledge-field:focus{outline:none;border-color:#a8b6ff}

@@ -8,6 +8,7 @@ import {
   MAX_SOURCE_ROOTS,
   createSourceStore,
   normalizeRoots,
+  resolveAllowedFile,
   resolveScoutRoot,
 } from "../src/sources.mjs";
 
@@ -74,6 +75,34 @@ test("a scout root must resolve inside an allowed root", async () => {
     await assert.rejects(resolveScoutRoot(`${allowed}${path.sep}..${path.sep}allowed`, [allowed]), /\.\./u);
     await assert.rejects(resolveScoutRoot(path.join(allowed, "missing"), [allowed]), /不存在/u);
     await assert.rejects(resolveScoutRoot(child, [path.join(temporaryRoot, "not-there")]), /白名单/u);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("media files must be regular files inside an allowed root", async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-files-resolve-"));
+  try {
+    const allowed = path.join(temporaryRoot, "allowed");
+    const outside = path.join(temporaryRoot, "outside");
+    await mkdir(path.join(allowed, "sub"), { recursive: true });
+    await mkdir(outside, { recursive: true });
+    const inside = path.join(allowed, "sub", "clip.mp4");
+    const sibling = path.join(outside, "clip.mp4");
+    await writeFile(inside, "x");
+    await writeFile(sibling, "x");
+
+    assert.equal(await resolveAllowedFile(inside, [allowed]), await realpath(inside));
+    await assert.rejects(resolveAllowedFile(sibling, [allowed]), /白名单/u);
+    await assert.rejects(resolveAllowedFile(allowed, [allowed]), /不是普通文件/u);
+    await assert.rejects(resolveAllowedFile("relative.mp4", [allowed]), /绝对路径/u);
+    await assert.rejects(
+      resolveAllowedFile(`${inside}${path.sep}..${path.sep}sub${path.sep}clip.mp4`, [allowed]),
+      /\.\./u,
+    );
+    await assert.rejects(resolveAllowedFile(path.join(allowed, "missing.mp4"), [allowed]), /不存在/u);
+    await assert.rejects(resolveAllowedFile("  ", [allowed]), /请填写/u);
+    await assert.rejects(resolveAllowedFile(inside, [path.join(temporaryRoot, "not-there")]), /白名单/u);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }

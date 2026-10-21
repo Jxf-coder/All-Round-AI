@@ -46,7 +46,10 @@ test("the catalog lists implemented capabilities and keeps later phases visible"
     assert.equal(skills.get("doc-rewrite").enabled, false);
     assert.equal(skills.get("doc-rewrite").available, false);
     assert.match(skills.get("doc-rewrite").reason, /迁移中/);
-    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 10, available: 7, comingSoon: 4 });
+    assert.equal(skills.get("audio-extract").enabled, true);
+    assert.equal(skills.get("audio-extract").available, false);
+    assert.match(skills.get("audio-extract").reason, /FFmpeg/);
+    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 11, available: 7, comingSoon: 4 });
   } finally {
     await fixture.close();
   }
@@ -76,6 +79,27 @@ test("desk availability follows declared capabilities and separates online state
     assert.equal(online.get("local-files").online, 2);
     assert.equal(online.get("local-screen").devices, 1);
     assert.equal(online.get("local-screen").online, 1);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("media skills follow the detected FFmpeg install", async () => {
+  const fixture = await temporaryStore();
+  try {
+    const missing = byId(await fixture.store.list([], {
+      media: { ffmpeg: { available: false, reason: "未安装，或不在 PATH 里" } },
+    }));
+    assert.equal(missing.get("audio-extract").available, false);
+    assert.match(missing.get("audio-extract").reason, /未安装，或不在 PATH 里/u);
+    assert.equal(missing.get("media-inventory").available, true);
+
+    const ready = byId(await fixture.store.list([], {
+      media: { ffmpeg: { available: true } },
+    }));
+    assert.equal(ready.get("audio-extract").available, true);
+    assert.equal(ready.get("audio-extract").reason, "");
+    assert.equal(ready.get("media-inventory").available, true);
   } finally {
     await fixture.close();
   }
@@ -125,5 +149,6 @@ test("command and pipeline mappings stay inside the catalog", () => {
   assert.equal(skillForPipeline("topic-pack"), "topic-pack");
   assert.equal(skillForPipeline("script-rewrite"), "script-rewrite");
   assert.equal(skillForPipeline("media-inventory"), "media-inventory");
+  assert.equal(skillForPipeline("audio-extract"), "audio-extract");
   assert.equal(skillForPipeline("unknown"), null);
 });

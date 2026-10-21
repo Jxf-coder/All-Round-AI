@@ -97,3 +97,75 @@ export function createMediaToolProbe(options = {}) {
     return inflight;
   };
 }
+
+// Run one fixed media command. The handler supplies the binary path and the
+// full argument list; nothing here goes through a shell.
+export async function runMediaTool({
+  command,
+  args = [],
+  timeoutMs = 120_000,
+  maxBuffer = 8 * 1024 * 1024,
+  runner = defaultRunner,
+} = {}) {
+  if (typeof command !== "string" || !command.trim()) throw new TypeError("缺少媒体命令");
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) {
+    throw new TypeError("媒体命令参数必须是字符串数组");
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000) throw new TypeError("媒体命令超时无效");
+  const result = await runner(command, args, {
+    timeout: timeoutMs,
+    windowsHide: true,
+    maxBuffer,
+    env: minimalEnv(),
+  });
+  return {
+    stdout: String(result?.stdout ?? ""),
+    stderr: String(result?.stderr ?? ""),
+  };
+}
+
+export function parseFfprobeJson(raw) {
+  let data;
+  try {
+    data = JSON.parse(String(raw ?? ""));
+  } catch {
+    throw new Error("ffprobe 返回了无法解析的内容");
+  }
+  if (!data || typeof data !== "object") throw new Error("ffprobe 返回格式无效");
+  const streams = Array.isArray(data.streams) ? data.streams : [];
+  const audioStream = streams.find((stream) => stream?.codec_type === "audio") ?? null;
+  const videoStream = streams.find((stream) => stream?.codec_type === "video") ?? null;
+  const duration = Number(data.format?.duration ?? audioStream?.duration);
+  const size = Number(data.format?.size);
+  return {
+    formatName: typeof data.format?.format_name === "string" ? data.format.format_name : "",
+    duration: Number.isFinite(duration) && duration >= 0 ? duration : null,
+    size: Number.isFinite(size) && size >= 0 ? size : null,
+    audio: audioStream ? {
+      codec: typeof audioStream.codec_name === "string" ? audioStream.codec_name : "",
+      sampleRate: Number(audioStream.sample_rate) || null,
+      channels: Number(audioStream.channels) || null,
+    } : null,
+    video: videoStream ? {
+      codec: typeof videoStream.codec_name === "string" ? videoStream.codec_name : "",
+      width: Number(videoStream.width) || null,
+      height: Number(videoStream.height) || null,
+    } : null,
+  };
+}
+
+export async function probeMediaFile({
+  ffprobePath,
+  filePath,
+  runner,
+  timeoutMs = 30_000,
+} = {}) {
+  if (typeof filePath !== "string" || !filePath) throw new TypeError("缺少要探测的媒体文件");
+  const result = await runMediaTool({
+    command: ffprobePath || "ffprobe",
+    args: ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-i", filePath],
+    timeoutMs,
+    runner,
+  });
+  return parseFfprobeJson(result.stdout);
+}

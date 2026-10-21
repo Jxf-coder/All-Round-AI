@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  AUDIO_FORMATS,
+  createAudioExtractHandler,
   createMediaInventoryHandler,
   mediaKindOf,
   scanMediaDirectory,
@@ -117,6 +119,222 @@ test("the handler refuses to be built without its dependencies", () => {
   );
   assert.throws(
     () => createMediaInventoryHandler({ sourceStore: { list: async () => ({ roots: [] }) }, artifactsDir: "relative" }),
+    /产物目录必须是绝对路径/u,
+  );
+});
+
+// --- audio extraction -----------------------------------------------------
+
+const FFMPEG = path.join(os.tmpdir(), "E-tools-ffmpeg.exe");
+const FFPROBE = path.join(os.tmpdir(), "E-tools-ffprobe.exe");
+
+function toolsAvailable() {
+  return {
+    ffmpeg: { available: true, path: FFMPEG, version: "ffmpeg version 7", reason: "" },
+    ffprobe: { available: true, path: FFPROBE, version: "ffprobe version 7", reason: "" },
+  };
+}
+
+function ffprobeJson(overrides = {}) {
+  return JSON.stringify({
+    format: { format_name: "mov,mp4,m4a", duration: "30.5", size: "2048" },
+    streams: [
+      { codec_type: "video", codec_name: "h264", width: 1920, height: 1080 },
+      { codec_type: "audio", codec_name: "aac", sample_rate: "48000", channels: 2 },
+    ],
+    ...overrides,
+  });
+}
+
+async function audioFixture(callback) {
+  await fixture(async ({ root, media, artifacts }) => {
+    const source = path.join(media, "a.mp4");
+    await callback({ root, media, artifacts, source });
+  });
+}
+
+test("audio extraction probes the source, transcodes and reports the artifact", async () => {
+  await audioFixture(async ({ media, artifacts, source }) => {
+    const calls = [];
+    const runner = async (command, args, options) => {
+      calls.push({ command, args, options });
+      if (command === FFPROBE) return { stdout: ffprobeJson(), stderr: "" };
+      await writeFile(args[args.length - 1], Buffer.alloc(4096, 7));
+      return { stdout: "", stderr: "" };
+    };
+    const handler = createAudioExtractHandler({
+      sourceStore: { list: async () => ({ roots: [media] }) },
+      artifactsDir: artifacts,
+      mediaProbe: async () => toolsAvailable(),
+      runner,
+    });
+    const outcome = await handler["media.extract-audio"]({
+      run: runLike(),
+      params: { source, format: "mp3" },
+    });
+
+    const artifact = outcome.artifacts[0];
+    assert.equal(artifact.slot, "audio");
+    assert.match(artifact.path, /run_media[\\/]audio\.mp3$/u);
+    assert.equal(artifact.label, "音频（MP3 (LAME 192k)）");
+    assert.equal(artifact.bytes, 4096);
+    assert.equal((await readFile(artifact.path)).length, 4096);
+
+    const ffmpegCall = calls.find((call) => call.command === FFMPEG);
+    assert.deepEqual(ffmpegCall.args.slice(0, 3), ["-hide_banner", "-nostdin", "-y"]);
+    assert.ok(ffmpegCall.args.includes("-vn"));
+    assert.deepEqual(
+      ffmpegCall.args.slice(ffmpegCall.args.indexOf("-map"), ffmpegCall.args.indexOf("-map") + 2),
+      ["-map", "0:a:0"],
+    );
+    assert.ok(ffmpegCall.args.includes("libmp3lame"));
+    // 30.5s * 3 秒/秒, clamped to the 60s floor.
+    assert.equal(ffmpegCall.options.timeout, 91_500);
+    assert.equal(ffmpegCall.options.env.FFMPEG_PATH, undefined);
+
+    assert.deepEqual(outcome.logs, [
+      "源文件：a.mp4",
+      "时长：0:31；音频：aac / 48000 Hz / 2 声道",
+      `MP3 (LAME 192k)，${(4096 / 1024).toFixed(1)} KB`,
+    ]);
+  });
+});
+
+test("audio extraction uses the requested container and codec", async () => {
+  await audioFixture(async ({ media, artifacts, source }) => {
+    const seen = [];
+    const runner = async (command, args) => {
+      if (command === FFPROBE) return { stdout: ffprobeJson(), stderr: "" };
+      seen.push(args);
+      await writeFile(args[args.length - 1], Buffer.alloc(64, 1));
+      return { stdout: "", stderr: "" };
+    };
+    const handler = createAudioExtractHandler({
+      sourceStore: { list: async () => ({ roots: [media] }) },
+      artifactsDir: artifacts,
+      mediaProbe: async () => toolsAvailable(),
+      runner,
+    });
+
+    for (const name of Object.keys(AUDIO_FORMATS)) {
+      const outcome = await handler["media.extract-audio"]({
+        run: { ...runLike(), id: `run_${name}` },
+        params: { source, format: name },
+      });
+      assert.match(outcome.artifacts[0].path, new RegExp(`audio\\.${name}$`, "u"));
+    }
+    assert.deepEqual(seen.map((args) => args[args.length - 1].split(".").pop()), ["m4a", "mp3", "wav"]);
+    assert.ok(seen[0].includes("aac"));
+    assert.ok(seen[2].includes("pcm_s16le"));
+  });
+});
+
+test("audio extraction refuses missing tools, unknown formats and files without audio", async () => {
+  await audioFixture(async ({ root, media, artifacts, source }) => {
+    const handlerWith = (mediaProbe, runner = async () => ({ stdout: "", stderr: "" })) =>
+      createAudioExtractHandler({
+        sourceStore: { list: async () => ({ roots: [media] }) },
+        artifactsDir: artifacts,
+        mediaProbe,
+        runner,
+      });
+
+    await assert.rejects(
+      handlerWith(async () => ({
+        ffmpeg: { available: false, reason: "未安装" },
+        ffprobe: { available: true, path: FFPROBE },
+      }))["media.extract-audio"]({ run: runLike(), params: { source, format: "m4a" } }),
+      /未检测到 FFmpeg/u,
+    );
+
+    await assert.rejects(
+      handlerWith(async () => toolsAvailable())["media.extract-audio"]({
+        run: runLike(),
+        params: { source, format: "flac" },
+      }),
+      /音频格式无效/u,
+    );
+
+    await assert.rejects(
+      handlerWith(async () => toolsAvailable(), async () => ({
+        stdout: ffprobeJson({ streams: [{ codec_type: "video", codec_name: "h264" }] }),
+        stderr: "",
+      }))["media.extract-audio"]({ run: runLike(), params: { source, format: "m4a" } }),
+      /没有音频轨/u,
+    );
+
+    await assert.rejects(
+      handlerWith(
+        async () => toolsAvailable(),
+        async () => ({ stdout: ffprobeJson(), stderr: "" }),
+      )["media.extract-audio"]({
+        run: runLike(),
+        params: { source: path.join(root, "outside.mp4"), format: "m4a" },
+      }),
+      /不存在|白名单/u,
+    );
+  });
+});
+
+test("a failed encode removes the partial file and reports the first error line", async () => {
+  await audioFixture(async ({ media, artifacts, source }) => {
+    const runner = async (command, args) => {
+      if (command === FFPROBE) return { stdout: ffprobeJson(), stderr: "" };
+      await writeFile(args[args.length - 1], Buffer.alloc(128, 9));
+      throw new Error("ffmpeg exited with code 1\nsecond line should be dropped");
+    };
+    const handler = createAudioExtractHandler({
+      sourceStore: { list: async () => ({ roots: [media] }) },
+      artifactsDir: artifacts,
+      mediaProbe: async () => toolsAvailable(),
+      runner,
+    });
+    await assert.rejects(
+      handler["media.extract-audio"]({ run: runLike(), params: { source, format: "m4a" } }),
+      (error) => {
+        assert.match(error.message, /^音频提取失败：ffmpeg exited with code 1$/u);
+        return true;
+      },
+    );
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "audio.m4a")), /ENOENT/u);
+  });
+});
+
+test("an encode that produces no bytes is rejected", async () => {
+  await audioFixture(async ({ media, artifacts, source }) => {
+    const runner = async (command, args) => {
+      if (command === FFPROBE) return { stdout: ffprobeJson(), stderr: "" };
+      await writeFile(args[args.length - 1], "");
+      return { stdout: "", stderr: "" };
+    };
+    const handler = createAudioExtractHandler({
+      sourceStore: { list: async () => ({ roots: [media] }) },
+      artifactsDir: artifacts,
+      mediaProbe: async () => toolsAvailable(),
+      runner,
+    });
+    await assert.rejects(
+      handler["media.extract-audio"]({ run: runLike(), params: { source, format: "wav" } }),
+      /输出文件为空/u,
+    );
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "audio.wav")), /ENOENT/u);
+  });
+});
+
+test("audio extraction refuses to be built without a probe or artifacts directory", () => {
+  assert.throws(
+    () => createAudioExtractHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: os.tmpdir(),
+    }),
+    /媒体工具探测/u,
+  );
+  assert.throws(
+    () => createAudioExtractHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: "relative",
+      mediaProbe: async () => toolsAvailable(),
+    }),
     /产物目录必须是绝对路径/u,
   );
 });

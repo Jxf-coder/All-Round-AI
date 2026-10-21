@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createMediaToolProbe, detectMediaTools, MEDIA_PROBE_TTL_MS } from "../src/media-tools.mjs";
+import {
+  createMediaToolProbe,
+  detectMediaTools,
+  MEDIA_PROBE_TTL_MS,
+  parseFfprobeJson,
+  runMediaTool,
+} from "../src/media-tools.mjs";
 
 function runnerStub(seen) {
   return async (command, args, options) => {
@@ -93,4 +99,45 @@ test("the probe caches its answer and a refresh bypasses the cache", async () =>
 
   await probe({ refresh: true });
   assert.equal(seen.length, 6);
+});
+
+test("ffprobe JSON is normalised and malformed output fails loudly", () => {
+  const info = parseFfprobeJson(JSON.stringify({
+    format: { format_name: "mov,mp4,m4a", duration: "12.5", size: "2048" },
+    streams: [
+      { codec_type: "video", codec_name: "h264", width: 1920, height: 1080 },
+      { codec_type: "audio", codec_name: "aac", sample_rate: "48000", channels: 2 },
+    ],
+  }));
+  assert.equal(info.formatName, "mov,mp4,m4a");
+  assert.equal(info.duration, 12.5);
+  assert.equal(info.size, 2048);
+  assert.deepEqual(info.audio, { codec: "aac", sampleRate: 48000, channels: 2 });
+  assert.deepEqual(info.video, { codec: "h264", width: 1920, height: 1080 });
+
+  const silent = parseFfprobeJson(JSON.stringify({ streams: [{ codec_type: "video" }] }));
+  assert.equal(silent.audio, null);
+  assert.equal(silent.duration, null);
+  assert.throws(() => parseFfprobeJson("not json"), /无法解析/u);
+});
+
+test("media commands run without a shell and validate their input", async () => {
+  const seen = [];
+  const result = await runMediaTool({
+    command: "E:\\FFmpeg\\bin\\ffmpeg.exe",
+    args: ["-version"],
+    runner: async (command, args, options) => {
+      seen.push({ command, args, options });
+      return { stdout: "ok", stderr: "" };
+    },
+  });
+  assert.equal(result.stdout, "ok");
+  assert.equal(seen[0].command, "E:\\FFmpeg\\bin\\ffmpeg.exe");
+  assert.deepEqual(seen[0].args, ["-version"]);
+  assert.equal(seen[0].options.windowsHide, true);
+  assert.equal(seen[0].options.env.HOME, undefined);
+
+  await assert.rejects(runMediaTool({ command: "" }), /缺少媒体命令/u);
+  await assert.rejects(runMediaTool({ command: "ffmpeg", args: [1] }), /字符串数组/u);
+  await assert.rejects(runMediaTool({ command: "ffmpeg", timeoutMs: 10 }), /超时无效/u);
 });

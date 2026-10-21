@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
+import { createReadStream } from "node:fs";
 import path from "node:path";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { ensureAppDirectories } from "../../../packages/platform/src/directories.mjs";
@@ -19,7 +20,7 @@ import { AUTOMATION_PIPELINES, createAutomationEngine, createAutomationStore, de
 import { createAutomationConfigStore, mergeAutomationParams } from "./automation-config.mjs";
 import { createKnowledgeBriefHandlers } from "./automation-knowledge.mjs";
 import { createRewriteHandler, createScriptDraftHandler, createTopicPackHandler } from "./automation-ai.mjs";
-import { createMediaInventoryHandler } from "./automation-media.mjs";
+import { createAudioExtractHandler, createMediaInventoryHandler } from "./automation-media.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
@@ -59,6 +60,16 @@ const CONTENT_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
+]);
+const ARTIFACT_CONTENT_TYPES = new Map([
+  [".m4a", "audio/mp4"],
+  [".mp3", "audio/mpeg"],
+  [".wav", "audio/wav"],
+  [".mp4", "video/mp4"],
+  [".mov", "video/quicktime"],
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
 ]);
 const CONTENT_SECURITY_POLICY =
   "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
@@ -331,6 +342,14 @@ export async function startLocalRuntime(options = {}) {
       ...createMediaInventoryHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
+      }),
+      ...createAudioExtractHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+        mediaProbe,
+        // Test seam only: production leaves this undefined so media-tools
+        // spawns through its own fixed exec runner.
+        runner: options.mediaRun,
       }),
     },
   });
@@ -811,7 +830,8 @@ export async function startLocalRuntime(options = {}) {
   // app skills are ready, desk skills need a paired agent that advertised the
   // capability, and later-phase entries say they are not switchable yet.
   async function skillList() {
-    return skillsStore.list(await deviceRegistry.list());
+    const [devices, media] = await Promise.all([deviceRegistry.list(), mediaProbe()]);
+    return skillsStore.list(devices, { media });
   }
 
   // A disabled switch refuses with a stable message instead of silently doing
@@ -1001,6 +1021,51 @@ export async function startLocalRuntime(options = {}) {
     } catch {
       json(ctx.response, 404, { error: "产物文件已不存在" });
     }
+    return true;
+  });
+
+  // Binary artifacts (audio, video, images) cannot be JSON previewed. The
+  // download stays scoped to this run and to the artifacts directory.
+  router.get("/api/automation/runs/:id/artifacts/:slot/download", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const run = await automation.read(ctx.params.id);
+    if (!run) {
+      json(ctx.response, 404, { error: "运行不存在" });
+      return true;
+    }
+    const artifact = Object.values(run.steps)
+      .flatMap((state) => state.artifacts)
+      .find((entry) => entry.slot === ctx.params.slot);
+    if (!artifact) {
+      json(ctx.response, 404, { error: "这一步没有这个产物" });
+      return true;
+    }
+    const absolute = path.resolve(artifact.path);
+    const root = path.resolve(automationArtifacts);
+    if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) {
+      json(ctx.response, 403, { error: "产物路径不在允许范围内" });
+      return true;
+    }
+    let info;
+    try {
+      info = await stat(absolute);
+    } catch {
+      json(ctx.response, 404, { error: "产物文件已不存在" });
+      return true;
+    }
+    if (!info.isFile()) {
+      json(ctx.response, 404, { error: "产物不是文件" });
+      return true;
+    }
+    const type = ARTIFACT_CONTENT_TYPES.get(path.extname(absolute).toLowerCase())
+      ?? "application/octet-stream";
+    ctx.response.writeHead(200, {
+      "content-type": type,
+      "content-length": String(info.size),
+      "content-disposition": `attachment; filename="${path.basename(absolute)}"`,
+      "cache-control": "no-store",
+    });
+    createReadStream(absolute).pipe(ctx.response);
     return true;
   });
 

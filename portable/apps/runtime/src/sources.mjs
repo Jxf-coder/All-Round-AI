@@ -108,6 +108,23 @@ export async function createSourceStore(filePath, { defaultRoots = [] } = {}) {
 // Resolve the requested directory and prove it is inside one of the allowed
 // roots. `realpath` on both sides makes symlinks and `..` segments harmless:
 // the comparison happens between canonical paths, never the raw input.
+async function insideAllowedRoot(target, roots) {
+  for (const root of roots) {
+    let allowed;
+    try {
+      allowed = await realpath(root);
+    } catch {
+      continue;
+    }
+    const relative = path.relative(allowed, target);
+    if (relative === ""
+      || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function resolveScoutRoot(requested, roots) {
   if (typeof requested !== "string" || !requested.trim()) {
     throw new TypeError("请填写要巡读的目录");
@@ -127,19 +144,27 @@ export async function resolveScoutRoot(requested, roots) {
   }
   const info = await stat(target);
   if (!info.isDirectory()) throw new Error(`不是文件夹：${value}`);
-
-  for (const root of roots) {
-    let allowed;
-    try {
-      allowed = await realpath(root);
-    } catch {
-      continue;
-    }
-    const relative = path.relative(allowed, target);
-    if (relative === ""
-      || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
-      return target;
-    }
-  }
+  if (await insideAllowedRoot(target, roots)) return target;
   throw new Error(`目录不在白名单里：${value}。请先在「来源配置」里加入可巡读目录`);
+}
+
+// Media pipelines read single files, so they need the same proof as a
+// directory scan: canonical path, inside an allowed root, and a regular file.
+export async function resolveAllowedFile(requested, roots) {
+  if (typeof requested !== "string" || !requested.trim()) {
+    throw new TypeError("请填写要读取的文件");
+  }
+  const value = requested.trim();
+  if (!path.isAbsolute(value)) throw new TypeError("文件路径必须是绝对路径");
+  if (hasTraversal(value)) throw new TypeError("文件路径不能包含 ..");
+  let target;
+  try {
+    target = await realpath(value);
+  } catch {
+    throw new Error(`文件不存在或无法访问：${value}`);
+  }
+  const info = await stat(target);
+  if (!info.isFile()) throw new Error(`不是普通文件：${value}`);
+  if (await insideAllowedRoot(target, roots)) return target;
+  throw new Error(`文件不在白名单里：${value}。请先在「来源配置」里加入可读取目录`);
 }

@@ -301,6 +301,50 @@ export const AUTOMATION_PIPELINES = Object.freeze([
       },
     ],
   },
+  {
+    id: "audio-extract",
+    name: "音频提取",
+    desc: "从来源白名单内的视频或音频文件提取一条音频轨，输出 M4A / MP3 / WAV，供后续播客与成片使用。",
+    steps: [
+      {
+        id: "extract",
+        name: "提取音频",
+        runner: "app",
+        desc: "先用 ffprobe 读取时长与音频参数，再调用 FFmpeg 转码；没有音频轨会直接失败。",
+        action: "media.extract-audio",
+        outputs: [{ slot: "audio", label: "音频文件" }],
+        params: [
+          {
+            key: "source",
+            label: "源文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的绝对路径",
+          },
+          {
+            key: "format",
+            label: "输出格式",
+            type: "select",
+            default: "m4a",
+            options: [
+              { value: "m4a", label: "M4A（AAC 192k）" },
+              { value: "mp3", label: "MP3（LAME 192k）" },
+              { value: "wav", label: "WAV（PCM 16-bit）" },
+            ],
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "试听提取结果后结束本次运行。",
+        after: ["extract"],
+        manualHint: "试听音频后点击「我做完了」",
+      },
+    ],
+  },
 ]);
 
 function fail(message) {

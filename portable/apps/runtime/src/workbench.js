@@ -2337,6 +2337,12 @@ function renderAutomationBody() {
           `查看${artifact.label || artifact.slot}`,
           () => void openAutomationArtifact(run.id, artifact.slot),
         ));
+        if (/\.(m4a|mp3|wav|mp4|mov|png|jpe?g)$/iu.test(artifact.path ?? "")) {
+          const link = element("a", "knowledge-action", `下载${artifact.label || artifact.slot}`);
+          link.href = `/api/automation/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.slot)}/download`;
+          link.setAttribute("download", "");
+          row.append(link);
+        }
       }
       if (stepState.status === "waiting_manual") {
         row.append(actionButton(
