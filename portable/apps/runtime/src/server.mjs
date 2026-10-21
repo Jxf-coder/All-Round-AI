@@ -16,6 +16,7 @@ import { createDeviceRegistry, readDeviceToken } from "./devices.mjs";
 import { createDeviceChannel } from "./device-channel.mjs";
 import { createAuditLog } from "./audit.mjs";
 import { AUTOMATION_PIPELINES, createAutomationEngine, createAutomationStore, describePipeline } from "./automation.mjs";
+import { createAutomationConfigStore, mergeAutomationParams } from "./automation-config.mjs";
 import { createKnowledgeBriefHandlers } from "./automation-knowledge.mjs";
 import { createRewriteHandler, createScriptDraftHandler, createTopicPackHandler } from "./automation-ai.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
@@ -289,6 +290,10 @@ export async function startLocalRuntime(options = {}) {
   // Pipeline runs are persisted as snapshots; artifacts keep step output.
   const automationStore = options.automationStore
     ?? createAutomationStore({ filePath: path.join(directories.config, "automation-runs.json") });
+  // Params are remembered per project so a repeated run does not start from
+  // blank fields; the run snapshot still wins once a run exists.
+  const automationConfigStore = options.automationConfigStore
+    ?? await createAutomationConfigStore(path.join(directories.config, "automation-config.json"));
   const automationArtifacts = path.join(directories.data, "artifacts");
   // AI-backed steps use whichever engine the installation already selected, so
   // a local Ollama install works without a second model configuration.
@@ -843,6 +848,15 @@ export async function startLocalRuntime(options = {}) {
     return true;
   });
 
+  // Missing request fields fall back to the project's last accepted values;
+  // a malformed body passes through untouched so the engine rejects it once.
+  async function effectiveAutomationParams(projectId, pipelineId, input) {
+    const requested = input === undefined ? {} : input;
+    if (!requested || typeof requested !== "object" || Array.isArray(requested)) return requested;
+    const saved = await automationConfigStore.get(projectId, pipelineId);
+    return mergeAutomationParams(saved, requested);
+  }
+
   // Automation runs: a pipeline is a frozen step list, a run is its snapshot.
   // Starting, confirming and cancelling are privileged enough to be audited.
   async function automationFailure(ctx, actor, action, target, error) {
@@ -866,9 +880,14 @@ export async function startLocalRuntime(options = {}) {
         ...(skillId ? { skillId, enabled: await skillsStore.isEnabled(skillId) } : {}),
       };
     }));
+    const requestedProject = ctx.url.searchParams.get("projectId");
+    const configs = requestedProject && await projectStore.get(requestedProject)
+      ? await automationConfigStore.list(requestedProject)
+      : {};
     json(ctx.response, 200, {
       pipelines,
       runs: await automation.list(),
+      configs,
     });
     return true;
   });
@@ -897,8 +916,15 @@ export async function startLocalRuntime(options = {}) {
         pipelineId: body.pipelineId,
         projectId,
         actor: actor.id,
-        params: body.params,
+        params: await effectiveAutomationParams(projectId, body.pipelineId, body.params),
       });
+      // Remember what was actually accepted. A failure here must not fail a run
+      // that already started, so it is logged instead.
+      try {
+        await automationConfigStore.save(projectId, body.pipelineId, run.params);
+      } catch (error) {
+        void logger.warn("Pipeline config could not be saved", { message: error.message });
+      }
       await recordAudit({
         actor: actor.id,
         action: "automation.run",

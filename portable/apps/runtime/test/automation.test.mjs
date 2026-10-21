@@ -283,6 +283,33 @@ test("runs are bounded and damaged files fail closed", async () => {
   }, { maxRuns: 2 });
 });
 
+test("a pipeline refuses more active runs than its concurrency limit", async () => {
+  await withStore(async ({ store }) => {
+    const handlers = { "test.a": async () => ({}), "test.b": async () => ({}) };
+    const engine = createAutomationEngine({
+      store,
+      pipelines: [{ ...DEMO, maxRunning: 2 }],
+      handlers,
+    });
+    const first = await engine.start({ pipelineId: "demo", projectId: "project-1" });
+    const second = await engine.start({ pipelineId: "demo", projectId: "project-1" });
+    assert.equal(first.status, "waiting_manual");
+    assert.equal(second.status, "waiting_manual");
+
+    await assert.rejects(
+      engine.start({ pipelineId: "demo", projectId: "project-1" }),
+      (error) => error.code === "RUNNING_LIMIT" && error.status === 409,
+    );
+    // Another project has its own count.
+    const elsewhere = await engine.start({ pipelineId: "demo", projectId: "project-2" });
+    assert.equal(elsewhere.status, "waiting_manual");
+
+    await engine.completeManual({ runId: first.id, stepId: "c", actor: "tester" });
+    const third = await engine.start({ pipelineId: "demo", projectId: "project-1" });
+    assert.equal(third.status, "waiting_manual");
+  });
+});
+
 test("starting validates the pipeline and the project", async () => {
   await withStore(async ({ store }) => {
     const engine = createAutomationEngine({ store, pipelines: [DEMO], handlers: {} });
@@ -352,6 +379,7 @@ test("a definition with broken params is refused up front", () => {
     () => validatePipelines([stepWith([{ key: "x", label: "X", type: "number", multiline: true }])]),
     /多行标记无效/u,
   );
+  assert.throws(() => validatePipelines([{ ...DEMO, maxRunning: 11 }]), /并发上限无效/u);
 });
 
 test("run params reach the handler and survive a reload", async () => {

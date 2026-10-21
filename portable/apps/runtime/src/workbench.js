@@ -722,7 +722,10 @@ async function selectProject(id) {
     return;
   }
   if (activePanel === "database") await refreshKnowledge();
-  if (activePanel === "automation") await refreshAutomation();
+  if (activePanel === "automation") {
+    automationDraft = {};
+    await refreshAutomation();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2109,14 +2112,29 @@ const STEP_STATUS_LABELS = {
   skipped: "已跳过",
 };
 
+// Saved params are only a starting point: a value the operator already typed
+// stays put across refreshes, and a different project starts from its own set.
+function seedAutomationDraft(configs) {
+  for (const [pipelineId, entry] of Object.entries(configs ?? {})) {
+    for (const [stepId, values] of Object.entries(entry?.params ?? {})) {
+      for (const [key, value] of Object.entries(values ?? {})) {
+        const draftKey = `${pipelineId}.${stepId}.${key}`;
+        if (automationDraft[draftKey] === undefined) automationDraft[draftKey] = value;
+      }
+    }
+  }
+}
+
 async function refreshAutomation() {
   automationState = { ...(automationState ?? {}), busy: false };
+  const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : "";
   try {
-    const response = await apiRequest("/api/automation");
+    const response = await apiRequest(`/api/automation${query}`);
     const body = await response?.json().catch(() => null);
     automationState = response?.ok
       ? { pipelines: body?.pipelines ?? [], runs: body?.runs ?? [] }
       : { pipelines: [], runs: [], error: body?.error || "读取自动化列表失败。" };
+    if (response?.ok) seedAutomationDraft(body?.configs);
   } catch {
     automationState = { pipelines: [], runs: [], error: "连不上运行时，稍后再试。" };
   }
@@ -2290,7 +2308,10 @@ function renderAutomationBody() {
     const head = element("div", "automation-run-head");
     head.append(automationBadge(run.status, RUN_STATUS_LABELS));
     head.append(element("b", null, automationPipelineName(state, run.pipelineId)));
-    head.append(element("span", "device-meta", `${run.projectId} · ${deviceTime(run.createdAt)}`));
+    // The project id is a UUID and identical for every run in the list, so the
+    // card shows the readable project name plus a short run suffix instead.
+    head.append(element("span", "device-meta",
+      `${projectNameOf(run.projectId)} · ${deviceTime(run.createdAt)} · #${String(run.id).slice(-6)}`));
     card.append(head);
 
     const list = element("ul", "automation-step-list");
@@ -2617,7 +2638,7 @@ function showPanelView(panel, label) {
     return;
   }
   if (panel === "automation") {
-    panelCopy.textContent = "产线按步骤执行：本机步骤自动完成，人工步骤需要你确认后才会继续；运行记录与产物都留在本地。";
+    panelCopy.textContent = "产线按步骤执行：本机步骤自动完成，人工步骤需要你确认后才会继续；参数按项目记住，运行记录与产物都留在本地。";
     automationState = null;
     automationArtifact = null;
     automationError = null;

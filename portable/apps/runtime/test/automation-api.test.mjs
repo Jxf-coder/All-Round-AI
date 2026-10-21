@@ -226,6 +226,66 @@ test("the script pipeline drafts with the configured model and waits for review"
     );
     assert.equal(confirmed.status, 200);
     assert.equal((await confirmed.json()).run.status, "done");
+
+    const listed = await (await fetch(`${app.runtime.url}/api/automation?projectId=${app.projectId}`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+    assert.equal(listed.configs["script-draft"].params.draft.topic, "售后响应");
+    assert.equal(listed.configs["script-draft"].params.draft.durationSec, 45);
+  } finally {
+    await app.close();
+  }
+});
+
+test("pipeline params are remembered per project and active runs are capped", async () => {
+  const app = await boot();
+  try {
+    const endpoint = `${app.runtime.url}/api/automation/runs`;
+    const first = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "topic-pack",
+        projectId: app.projectId,
+        params: { topics: { count: 2, audience: "switcher", focus: "售后", maxCards: 1 } },
+      }),
+    });
+    assert.equal(first.status, 201);
+    assert.equal((await first.json()).run.status, "waiting_manual");
+
+    // Only the count is sent: the other fields come from the stored config.
+    const second = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "topic-pack",
+        projectId: app.projectId,
+        params: { topics: { count: 4 } },
+      }),
+    });
+    assert.equal(second.status, 201);
+    const secondRun = (await second.json()).run;
+    assert.equal(secondRun.params.topics.count, 4);
+    assert.equal(secondRun.params.topics.focus, "售后");
+    assert.equal(secondRun.params.topics.audience, "switcher");
+
+    const limited = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "topic-pack",
+        projectId: app.projectId,
+        params: { topics: { count: 1 } },
+      }),
+    });
+    assert.equal(limited.status, 409);
+    assert.match((await limited.json()).error, /最多同时 2 个/u);
+
+    const listed = await (await fetch(`${app.runtime.url}/api/automation?projectId=${app.projectId}`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+    assert.equal(listed.configs["topic-pack"].params.topics.count, 4);
+    assert.equal(listed.pipelines.find((pipeline) => pipeline.id === "topic-pack").maxRunning, 2);
   } finally {
     await app.close();
   }

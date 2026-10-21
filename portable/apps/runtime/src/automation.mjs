@@ -15,6 +15,7 @@ import { createJsonFileStore } from "../../../packages/platform/src/storage.mjs"
 
 export const AUTOMATION_MAX_RUNS = 50;
 export const AUTOMATION_LIST_LIMIT = 20;
+export const DEFAULT_MAX_RUNNING = 2;
 export const RUN_STATUSES = Object.freeze(["running", "waiting_manual", "done", "failed", "cancelled"]);
 export const STEP_STATUSES = Object.freeze(["pending", "running", "waiting_manual", "done", "failed", "skipped"]);
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
@@ -378,6 +379,10 @@ export function validatePipelines(pipelines) {
     if (ids.has(definition.id)) fail(`产线 id 重复：${definition.id}`);
     ids.add(definition.id);
     if (typeof definition.name !== "string" || definition.name.trim() === "") fail(`产线 ${definition.id} 缺少名称`);
+    if (definition.maxRunning !== undefined
+      && (!Number.isSafeInteger(definition.maxRunning) || definition.maxRunning < 1 || definition.maxRunning > 10)) {
+      fail(`产线 ${definition.id} 的并发上限无效`);
+    }
     if (!Array.isArray(definition.steps) || definition.steps.length === 0) fail(`产线 ${definition.id} 没有步骤`);
     const seen = new Set();
     definition.steps.forEach((step, index) => validateStep(step, index, seen));
@@ -400,6 +405,7 @@ export function describePipeline(definition) {
     id: definition.id,
     name: definition.name,
     desc: definition.desc,
+    maxRunning: definition.maxRunning ?? DEFAULT_MAX_RUNNING,
     steps: definition.steps.map((step) => ({
       id: step.id,
       name: step.name,
@@ -680,24 +686,42 @@ export function createAutomationEngine({
         throw new AutomationError("BAD_PROJECT", "请先选择项目");
       }
       const resolvedParams = resolveRunParams(definition, params);
-      const at = iso();
-      const run = {
-        id: generateId(),
-        pipelineId,
-        projectId: projectId.trim(),
-        status: "running",
-        createdAt: at,
-        updatedAt: at,
-        finishedAt: null,
-        currentStep: null,
-        startedBy: typeof actor === "string" ? actor.slice(0, 200) : null,
-        params: resolvedParams,
-        definition: describePipeline(definition),
-        steps: Object.fromEntries(definition.steps.map((step) => [step.id, emptyState()])),
-        error: null,
-      };
-      await store.save(run);
-      return withLock(run.id, () => advance(run, definition));
+      const limit = definition.maxRunning ?? DEFAULT_MAX_RUNNING;
+      const project = projectId.trim();
+      // Two operators clicking at once must not both slip past the limit, so the
+      // count and the insert share one lock per pipeline and project.
+      return withLock(`start:${pipelineId}:${project}`, async () => {
+        const active = (await store.list(AUTOMATION_MAX_RUNS)).filter((entry) => (
+          entry.pipelineId === pipelineId
+          && entry.projectId === project
+          && !TERMINAL.has(entry.status)
+        ));
+        if (active.length >= limit) {
+          throw new AutomationError(
+            "RUNNING_LIMIT",
+            `这条产线已有 ${active.length} 个未结束的运行，最多同时 ${limit} 个`,
+            409,
+          );
+        }
+        const at = iso();
+        const run = {
+          id: generateId(),
+          pipelineId,
+          projectId: project,
+          status: "running",
+          createdAt: at,
+          updatedAt: at,
+          finishedAt: null,
+          currentStep: null,
+          startedBy: typeof actor === "string" ? actor.slice(0, 200) : null,
+          params: resolvedParams,
+          definition: describePipeline(definition),
+          steps: Object.fromEntries(definition.steps.map((step) => [step.id, emptyState()])),
+          error: null,
+        };
+        await store.save(run);
+        return withLock(run.id, () => advance(run, definition));
+      });
     },
 
     async completeManual({ runId, stepId, actor = null } = {}) {
