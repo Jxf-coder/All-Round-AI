@@ -46,7 +46,7 @@ test("the catalog lists implemented capabilities and keeps later phases visible"
     assert.equal(skills.get("doc-rewrite").enabled, false);
     assert.equal(skills.get("doc-rewrite").available, false);
     assert.match(skills.get("doc-rewrite").reason, /迁移中/);
-    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 7, available: 4, comingSoon: 4 });
+    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 9, available: 6, comingSoon: 4 });
   } finally {
     await fixture.close();
   }
@@ -122,5 +122,7 @@ test("command and pipeline mappings stay inside the catalog", () => {
   assert.equal(skillForCommand("unknown"), null);
   assert.equal(skillForPipeline("knowledge-brief"), "knowledge-brief");
   assert.equal(skillForPipeline("script-draft"), "script-draft");
+  assert.equal(skillForPipeline("topic-pack"), "topic-pack");
+  assert.equal(skillForPipeline("script-rewrite"), "script-rewrite");
   assert.equal(skillForPipeline("unknown"), null);
 });

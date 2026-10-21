@@ -142,6 +142,110 @@ export const AUTOMATION_PIPELINES = Object.freeze([
       },
     ],
   },
+  {
+    id: "topic-pack",
+    name: "选题提案",
+    desc: "按受众与数量从已确认知识里提炼可拍选题，写明角度与依据；没有依据的选题必须标成待补知识。",
+    steps: [
+      {
+        id: "topics",
+        name: "提炼选题",
+        runner: "app",
+        desc: "只读取已确认知识，让当前 AI 引擎产出选题清单，不写脚本正文。",
+        action: "ai.topic-pack",
+        outputs: [{ slot: "topics", label: "选题清单" }],
+        params: [
+          { key: "count", label: "选题数量", type: "number", default: 5, min: 1, max: 10 },
+          {
+            key: "audience",
+            label: "受众",
+            type: "select",
+            default: "boss",
+            options: [
+              { value: "boss", label: "企业老板" },
+              { value: "switcher", label: "转型者" },
+              { value: "operator", label: "操盘手" },
+            ],
+          },
+          {
+            key: "focus",
+            label: "聚焦方向",
+            type: "text",
+            default: "",
+            maxLength: 80,
+            hint: "留空表示不限",
+          },
+          { key: "maxCards", label: "最多引用知识卡", type: "number", default: 10, min: 0, max: 20 },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "挑出要开拍的选题后结束本次运行。",
+        after: ["topics"],
+        manualHint: "挑出要开拍的选题后点击「我做完了」",
+      },
+    ],
+  },
+  {
+    id: "script-rewrite",
+    name: "口播改写",
+    desc: "把已有草稿改写成可拍口播：保留原稿事实，按目标时长与语气重写，并核对已确认知识。",
+    steps: [
+      {
+        id: "rewrite",
+        name: "改写脚本",
+        runner: "app",
+        desc: "原稿与已确认知识一起交给当前 AI 引擎，产出按镜头分行的改写稿。",
+        action: "ai.script-rewrite",
+        outputs: [{ slot: "rewrite", label: "改写稿" }],
+        params: [
+          {
+            key: "draft",
+            label: "原始草稿",
+            type: "text",
+            required: true,
+            maxLength: 4000,
+            multiline: true,
+            hint: "粘贴待改写的整段口播稿",
+          },
+          {
+            key: "audience",
+            label: "受众",
+            type: "select",
+            default: "boss",
+            options: [
+              { value: "boss", label: "企业老板" },
+              { value: "switcher", label: "转型者" },
+              { value: "operator", label: "操盘手" },
+            ],
+          },
+          { key: "durationSec", label: "目标时长（秒）", type: "number", default: 60, min: 15, max: 300 },
+          {
+            key: "tone",
+            label: "语气",
+            type: "select",
+            default: "sincere",
+            options: [
+              { value: "sincere", label: "真诚克制" },
+              { value: "sharp", label: "直接犀利" },
+              { value: "warm", label: "温和陪伴" },
+            ],
+          },
+          { key: "maxCards", label: "最多引用知识卡", type: "number", default: 5, min: 0, max: 20 },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "核对事实与数字后结束本次运行。",
+        after: ["rewrite"],
+        manualHint: "核对事实与数字后点击「我做完了」",
+      },
+    ],
+  },
 ]);
 
 function fail(message) {
@@ -210,6 +314,10 @@ function validateParam(param, stepId, keys) {
       fail(`步骤 ${stepId} 的参数 ${param.key} 选项无效`);
     }
   }
+  if (param.multiline !== undefined
+    && (param.type !== "text" || typeof param.multiline !== "boolean")) {
+    fail(`步骤 ${stepId} 的参数 ${param.key} 的多行标记无效`);
+  }
   if (param.type === "number") {
     for (const bound of ["min", "max"]) {
       if (param[bound] !== undefined && !Number.isFinite(param[bound])) {
@@ -221,7 +329,7 @@ function validateParam(param, stepId, keys) {
     }
   }
   if (param.maxLength !== undefined
-    && (!Number.isSafeInteger(param.maxLength) || param.maxLength < 1 || param.maxLength > 1_000)) {
+    && (!Number.isSafeInteger(param.maxLength) || param.maxLength < 1 || param.maxLength > 8_000)) {
     fail(`步骤 ${stepId} 的参数 ${param.key} 长度上限无效`);
   }
   if (param.default !== undefined) {
@@ -309,6 +417,7 @@ export function describePipeline(definition) {
           ...(param.min !== undefined ? { min: param.min } : {}),
           ...(param.max !== undefined ? { max: param.max } : {}),
           ...(param.maxLength !== undefined ? { maxLength: param.maxLength } : {}),
+          ...(param.multiline ? { multiline: true } : {}),
           ...(param.options ? { options: param.options.map((option) => ({ ...option })) } : {}),
           ...(param.hint ? { hint: param.hint } : {}),
         })),

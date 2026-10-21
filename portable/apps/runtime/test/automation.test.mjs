@@ -348,6 +348,10 @@ test("a definition with broken params is refused up front", () => {
   );
   assert.throws(() => validatePipelines([stepWith([{ key: "x", label: "X", type: "select" }])]), /选项无效/u);
   assert.throws(() => validatePipelines([stepWith([{ key: "x", label: "X", type: "text", maxLength: 0 }])]), /长度上限无效/u);
+  assert.throws(
+    () => validatePipelines([stepWith([{ key: "x", label: "X", type: "number", multiline: true }])]),
+    /多行标记无效/u,
+  );
 });
 
 test("run params reach the handler and survive a reload", async () => {

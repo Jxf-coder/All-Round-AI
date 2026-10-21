@@ -17,7 +17,7 @@ import { createDeviceChannel } from "./device-channel.mjs";
 import { createAuditLog } from "./audit.mjs";
 import { AUTOMATION_PIPELINES, createAutomationEngine, createAutomationStore, describePipeline } from "./automation.mjs";
 import { createKnowledgeBriefHandlers } from "./automation-knowledge.mjs";
-import { createScriptDraftHandler } from "./automation-ai.mjs";
+import { createRewriteHandler, createScriptDraftHandler, createTopicPackHandler } from "./automation-ai.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
@@ -304,6 +304,16 @@ export async function startLocalRuntime(options = {}) {
         artifactsDir: automationArtifacts,
       }),
       ...createScriptDraftHandler({
+        chat: automationChat,
+        knowledgeStore,
+        artifactsDir: automationArtifacts,
+      }),
+      ...createTopicPackHandler({
+        chat: automationChat,
+        knowledgeStore,
+        artifactsDir: automationArtifacts,
+      }),
+      ...createRewriteHandler({
         chat: automationChat,
         knowledgeStore,
         artifactsDir: automationArtifacts,

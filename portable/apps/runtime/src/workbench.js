@@ -2165,7 +2165,8 @@ function automationPipelineName(state, id) {
 
 function automationParamField(pipeline, step, param) {
   const key = `${pipeline.id}.${step.id}.${param.key}`;
-  const field = element("label", "automation-param");
+  const multiline = param.type === "text" && param.multiline === true;
+  const field = element("label", multiline ? "automation-param wide" : "automation-param");
   field.append(element("span", "automation-param-label", `${step.name} · ${param.label}`));
   let input;
   if (param.type === "toggle") {
@@ -2188,8 +2189,12 @@ function automationParamField(pipeline, step, param) {
       automationDraft[key] = input.value;
     });
   } else {
-    input = element("input");
-    input.type = param.type === "number" ? "number" : "text";
+    input = element(multiline ? "textarea" : "input");
+    if (multiline) {
+      input.rows = 4;
+    } else {
+      input.type = param.type === "number" ? "number" : "text";
+    }
     if (param.type === "number") {
       if (param.min !== undefined) input.min = String(param.min);
       if (param.max !== undefined) input.max = String(param.max);

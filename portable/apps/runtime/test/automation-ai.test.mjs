@@ -4,7 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildScriptPrompt, createScriptDraftHandler } from "../src/automation-ai.mjs";
+import {
+  buildRewritePrompt,
+  buildScriptPrompt,
+  buildTopicPrompt,
+  createRewriteHandler,
+  createScriptDraftHandler,
+  createTopicPackHandler,
+} from "../src/automation-ai.mjs";
 
 const PARAMS = {
   topic: "售后响应",
@@ -121,4 +128,93 @@ test("the handler refuses to be built without a model call", () => {
     () => createScriptDraftHandler({ chat: async () => ({}), knowledgeStore: { list: async () => ({ cards: [] }) }, artifactsDir: "relative" }),
     /产物目录必须是绝对路径/u,
   );
+});
+
+const TOPIC_PARAMS = { count: 3, audience: "switcher", focus: "售后", maxCards: 1 };
+const REWRITE_PARAMS = {
+  draft: "旧稿第一段。\n旧稿第二段。",
+  audience: "operator",
+  durationSec: 30,
+  tone: "warm",
+  maxCards: 1,
+};
+
+test("topic and rewrite prompts carry their own task and the confirmed knowledge", () => {
+  const cards = [{ kind: "fact", title: "响应时效", body: "工作日 2 小时内响应。" }];
+  const topic = buildTopicPrompt(TOPIC_PARAMS, cards);
+  assert.match(topic, /受众：转型者/u);
+  assert.match(topic, /需要 3 条选题/u);
+  assert.match(topic, /聚焦方向：售后/u);
+  assert.match(topic, /\[fact\] 响应时效：工作日 2 小时内响应。/u);
+  assert.match(buildTopicPrompt(TOPIC_PARAMS, []), /待补知识/u);
+
+  const rewrite = buildRewritePrompt(REWRITE_PARAMS, cards);
+  assert.match(rewrite, /受众：操盘手/u);
+  assert.match(rewrite, /目标时长：约 30 秒/u);
+  assert.match(rewrite, /语气：温和陪伴/u);
+  assert.match(rewrite, /原始草稿：\n旧稿第一段。\n旧稿第二段。/u);
+  assert.match(rewrite, /响应时效/u);
+  assert.match(buildRewritePrompt(REWRITE_PARAMS, []), /需人工核对/u);
+});
+
+test("topic and rewrite handlers write their artifacts and only quote confirmed cards", async () => {
+  await withDir(async (root) => {
+    const prompts = [];
+    const knowledgeStore = {
+      list: async () => ({
+        cards: [
+          { kind: "fact", status: "confirmed", title: "响应时效", body: "两小时响应。" },
+          { kind: "fact", status: "pending", title: "未确认", body: "不应出现。" },
+        ],
+      }),
+    };
+    const chat = async ({ messages }) => {
+      prompts.push(messages[1].content);
+      if (messages[0].content.includes("改写")) {
+        return { content: "镜头 1：旧稿第一段。\n需人工核对：无。", model: "test-model" };
+      }
+      return { content: "## 选题 1：售后不是成本\n- 依据：响应时效", model: "test-model" };
+    };
+
+    const topics = await createTopicPackHandler({ chat, knowledgeStore, artifactsDir: root })
+      ["ai.topic-pack"]({ run: runLike(), params: TOPIC_PARAMS });
+    assert.equal(topics.artifacts[0].slot, "topics");
+    assert.match(topics.artifacts[0].path, /run_demo[\\/]topics\.md$/u);
+    const topicText = await readFile(topics.artifacts[0].path, "utf8");
+    assert.match(topicText, /^# 选题提案/u);
+    assert.match(topicText, /- 受众：转型者/u);
+    assert.match(topicText, /- 聚焦方向：售后/u);
+    assert.match(topicText, /- 引用知识卡：1 张/u);
+    assert.match(topicText, /## 选题 1：售后不是成本/u);
+    assert.deepEqual(topics.logs, ["引用已确认知识卡 1 张", "模型：test-model"]);
+
+    const rewrite = await createRewriteHandler({ chat, knowledgeStore, artifactsDir: root })
+      ["ai.script-rewrite"]({ run: runLike(), params: REWRITE_PARAMS });
+    assert.equal(rewrite.artifacts[0].slot, "rewrite");
+    const rewriteText = await readFile(rewrite.artifacts[0].path, "utf8");
+    assert.match(rewriteText, /^# 口播改写稿/u);
+    assert.match(rewriteText, /- 原稿字数：13/u);
+    assert.match(rewriteText, /- 引用知识卡：1 张/u);
+    assert.match(rewriteText, /镜头 1：/u);
+
+    assert.equal(prompts.length, 2);
+    for (const prompt of prompts) {
+      assert.match(prompt, /响应时效/u);
+      assert.equal(prompt.includes("未确认"), false);
+    }
+  });
+});
+
+test("an empty reply fails the topic step instead of writing an empty artifact", async () => {
+  await withDir(async (root) => {
+    const handler = createTopicPackHandler({
+      chat: async () => ({ content: "   " }),
+      knowledgeStore: { list: async () => ({ cards: [] }) },
+      artifactsDir: root,
+    });
+    await assert.rejects(
+      handler["ai.topic-pack"]({ run: runLike(), params: TOPIC_PARAMS }),
+      /模型没有返回选题内容/u,
+    );
+  });
 });

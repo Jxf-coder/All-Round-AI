@@ -69,8 +69,9 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 2);
-    assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id), ["knowledge-brief", "script-draft"]);
+    assert.equal(body.pipelines.length, 4);
+    assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
+      ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -225,6 +226,84 @@ test("the script pipeline drafts with the configured model and waits for review"
     );
     assert.equal(confirmed.status, 200);
     assert.equal((await confirmed.json()).run.status, "done");
+  } finally {
+    await app.close();
+  }
+});
+
+test("the topic and rewrite pipelines produce their own artifacts", async () => {
+  const app = await boot({
+    automationChat: async ({ messages }) => {
+      if (messages[0].content.includes("改写")) {
+        return { content: "镜头 1：旧稿第一段。\n需人工核对：无。", model: "test-model" };
+      }
+      return { content: "## 选题 1：售后不是成本\n- 依据：待补知识", model: "test-model" };
+    },
+  });
+  try {
+    const listed = await (await fetch(`${app.runtime.url}/api/automation`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+    const rewritePipeline = listed.pipelines.find((pipeline) => pipeline.id === "script-rewrite");
+    const draft = rewritePipeline.steps[0].params.find((param) => param.key === "draft");
+    assert.equal(draft.multiline, true);
+    assert.equal(draft.maxLength, 4_000);
+    assert.equal(draft.required, true);
+
+    const endpoint = `${app.runtime.url}/api/automation/runs`;
+    const missingDraft = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ pipelineId: "script-rewrite", projectId: app.projectId, params: { rewrite: {} } }),
+    });
+    assert.equal(missingDraft.status, 400);
+    assert.match((await missingDraft.json()).error, /原始草稿不能为空/u);
+
+    const topics = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "topic-pack",
+        projectId: app.projectId,
+        params: { topics: { count: 2, audience: "switcher", focus: "售后", maxCards: 0 } },
+      }),
+    });
+    assert.equal(topics.status, 201);
+    const topicRun = (await topics.json()).run;
+    assert.equal(topicRun.status, "waiting_manual");
+    assert.equal(topicRun.steps.topics.artifacts[0].slot, "topics");
+    const topicArtifact = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${topicRun.id}/artifacts/topics`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(topicArtifact.text, /^# 选题提案/u);
+    assert.match(topicArtifact.text, /- 受众：转型者/u);
+    assert.match(topicArtifact.text, /- 聚焦方向：售后/u);
+    assert.match(topicArtifact.text, /## 选题 1：售后不是成本/u);
+
+    const rewrite = await fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "script-rewrite",
+        projectId: app.projectId,
+        params: {
+          rewrite: { draft: "旧稿第一段。", audience: "operator", durationSec: 30, tone: "warm", maxCards: 0 },
+        },
+      }),
+    });
+    assert.equal(rewrite.status, 201);
+    const rewriteRun = (await rewrite.json()).run;
+    assert.equal(rewriteRun.status, "waiting_manual");
+    assert.equal(rewriteRun.steps.rewrite.artifacts[0].slot, "rewrite");
+    const rewriteArtifact = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${rewriteRun.id}/artifacts/rewrite`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(rewriteArtifact.text, /^# 口播改写稿/u);
+    assert.match(rewriteArtifact.text, /- 原稿字数：6/u);
+    assert.match(rewriteArtifact.text, /镜头 1：旧稿第一段。/u);
+    assert.match(rewriteArtifact.text, /需人工核对：无/u);
   } finally {
     await app.close();
   }
