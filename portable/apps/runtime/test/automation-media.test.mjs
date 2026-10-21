@@ -11,9 +11,12 @@ import {
   VIDEO_SPECS,
   createAudioExtractHandler,
   createMediaInventoryHandler,
+  createSubtitleMuxHandler,
   createVideoNormalizeHandler,
   createVideoReframeHandler,
+  formatSrt,
   mediaKindOf,
+  parseSrt,
   scanMediaDirectory,
 } from "../src/automation-media.mjs";
 
@@ -708,6 +711,234 @@ test("platform reframing refuses to be built without its dependencies", () => {
   );
   assert.throws(
     () => createVideoReframeHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: os.tmpdir(),
+    }),
+    /媒体工具探测/u,
+  );
+});
+
+// --- subtitle muxing -----------------------------------------------------
+
+const SAMPLE_SRT = "1\r\n00:00:00,500 --> 00:00:02,000\r\n第一句字幕\r\n\r\n"
+  + "2\r\n00:00:02,500 --> 00:00:04,000\r\n第二句字幕\r\n";
+
+test("SRT is parsed, validated and re-emitted with stable indexes", () => {
+  const cues = parseSrt(SAMPLE_SRT);
+  assert.deepEqual(cues, [
+    { start: 500, end: 2_000, text: "第一句字幕" },
+    { start: 2_500, end: 4_000, text: "第二句字幕" },
+  ]);
+  assert.equal(formatSrt(cues),
+    "1\n00:00:00,500 --> 00:00:02,000\n第一句字幕\n\n"
+    + "2\n00:00:02,500 --> 00:00:04,000\n第二句字幕\n");
+  // Indexes are optional: the time line alone is enough.
+  assert.equal(parseSrt("00:00:01,000 --> 00:00:02,000\n没有序号\n")[0].start, 1_000);
+
+  assert.throws(() => parseSrt(""), /不能为空/u);
+  assert.throws(() => parseSrt("只有文字，没有时间码"), /缺少时间码/u);
+  assert.throws(() => parseSrt("00:00:03,000 --> 00:00:02,000\n倒序\n"), /时间范围无效/u);
+  assert.throws(() => parseSrt("00:00:01,000 --> 00:00:02,000\n "), /没有文字/u);
+  assert.throws(
+    () => parseSrt("00:00:05,000 --> 00:00:06,000\n后\n\n00:00:01,000 --> 00:00:02,000\n前\n"),
+    /按从前到后排列/u,
+  );
+  assert.throws(
+    () => parseSrt(`00:00:01,000 --> 00:00:02,000\n${"字".repeat(501)}`),
+    /超过 500 个字符/u,
+  );
+  const many = Array.from({ length: 501 }, (_, index) => {
+    const start = String(index).padStart(2, "0");
+    return `00:00:${start},000 --> 00:00:${start},500\n第 ${index + 1} 条`;
+  }).join("\n\n");
+  assert.throws(() => parseSrt(many), /最多 500 条/u);
+  assert.throws(() => formatSrt([]), /不能为空/u);
+});
+
+function subtitleHandler({ media, artifacts, runner, mediaProbe = async () => toolsAvailable() }) {
+  return createSubtitleMuxHandler({
+    sourceStore: { list: async () => ({ roots: [media] }) },
+    artifactsDir: artifacts,
+    mediaProbe,
+    runner,
+  });
+}
+
+test("subtitle muxing copies the source and adds a mov_text track", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const calls = [];
+    const runner = async (command, args, options) => {
+      calls.push({ command, args, options });
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { duration: "10.0" },
+            streams: [
+              { codec_type: "video", codec_name: "h264", width: 1920, height: 1080 },
+              { codec_type: "audio", codec_name: "aac" },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      await writeFile(args[args.length - 1], Buffer.alloc(2048, 3));
+      return { stdout: "", stderr: "" };
+    };
+    const outcome = await subtitleHandler({ media, artifacts, runner })["media.mux-subtitles"]({
+      run: runLike(),
+      params: { source, subtitles: SAMPLE_SRT },
+    });
+
+    assert.deepEqual(outcome.artifacts.map((entry) => entry.slot), ["video", "subtitles"]);
+    assert.equal(outcome.artifacts[0].label, "字幕视频（MP4 / mov_text）");
+    assert.equal(outcome.artifacts[0].bytes, 2048);
+    const srtPath = outcome.artifacts[1].path;
+    assert.match(srtPath, /run_media[\\/]subtitles\.srt$/u);
+    const srtText = await readFile(srtPath, "utf8");
+    assert.equal(srtText, formatSrt(parseSrt(SAMPLE_SRT)));
+    assert.equal(outcome.artifacts[1].bytes, Buffer.byteLength(srtText, "utf8"));
+
+    const encode = calls.find((call) => call.args.includes("-map"));
+    assert.deepEqual(
+      encode.args.slice(encode.args.indexOf("-map"), encode.args.indexOf("-map") + 4),
+      ["-map", "0", "-map", "1:0"],
+    );
+    assert.ok(encode.args.includes("copy"));
+    assert.ok(encode.args.includes("mov_text"));
+    assert.ok(encode.args.includes("language=chi"));
+    assert.equal(encode.options.timeout, 60_000);
+    assert.deepEqual(outcome.logs, [
+      "源文件：a.mp4，时长 0:10",
+      "字幕 2 条，最后一条结束于 4.0 秒",
+      `视频 2.0 KB；SRT ${Buffer.byteLength(srtText, "utf8")} B`,
+    ]);
+  });
+});
+
+test("subtitle muxing refuses bad SRT, missing tools and over-long subtitles", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const never = async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { duration: "10.0" },
+            streams: [{ codec_type: "video", codec_name: "h264", width: 1280, height: 720 }],
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error("should not encode");
+    };
+    await assert.rejects(
+      subtitleHandler({ media, artifacts, runner: never })["media.mux-subtitles"]({
+        run: runLike(),
+        params: { source, subtitles: "没有时间码" },
+      }),
+      /缺少时间码/u,
+    );
+
+    await assert.rejects(
+      subtitleHandler({
+        media,
+        artifacts,
+        runner: never,
+        mediaProbe: async () => ({
+          ffmpeg: { available: false, reason: "未安装" },
+          ffprobe: { available: false, reason: "未安装" },
+        }),
+      })["media.mux-subtitles"]({
+        run: runLike(),
+        params: { source, subtitles: SAMPLE_SRT },
+      }),
+      /未检测到 FFmpeg/u,
+    );
+
+    // The last cue ends at 4s, but the clip is only 2s.
+    const shortClip = async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { duration: "2.0" },
+            streams: [{ codec_type: "video", codec_name: "h264", width: 1280, height: 720 }],
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error("should not encode");
+    };
+    await assert.rejects(
+      subtitleHandler({ media, artifacts, runner: shortClip })["media.mux-subtitles"]({
+        run: runLike(),
+        params: { source, subtitles: SAMPLE_SRT },
+      }),
+      /字幕超出视频时长/u,
+    );
+
+    const audioOnly = async (command, args) => {
+      if (args.includes("-print_format")) {
+        return { stdout: JSON.stringify({ format: { duration: "10" }, streams: [{ codec_type: "audio" }] }), stderr: "" };
+      }
+      throw new Error("should not encode");
+    };
+    await assert.rejects(
+      subtitleHandler({ media, artifacts, runner: audioOnly })["media.mux-subtitles"]({
+        run: runLike(),
+        params: { source, subtitles: SAMPLE_SRT },
+      }),
+      /没有视频轨/u,
+    );
+  });
+});
+
+test("a failed subtitle mux removes the SRT and the partial video", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const runner = async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { duration: "10" },
+            streams: [{ codec_type: "video", codec_name: "h264", width: 1280, height: 720 }],
+          }),
+          stderr: "",
+        };
+      }
+      await writeFile(args[args.length - 1], Buffer.alloc(64, 1));
+      throw new Error("mux failed");
+    };
+    await assert.rejects(
+      subtitleHandler({ media, artifacts, runner })["media.mux-subtitles"]({
+        run: runLike(),
+        params: { source, subtitles: SAMPLE_SRT },
+      }),
+      (error) => {
+        assert.equal(error.message, "字幕封装失败：mux failed");
+        return true;
+      },
+    );
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "subtitled.mp4")), /ENOENT/u);
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "subtitles.srt")), /ENOENT/u);
+  });
+});
+
+test("subtitle muxing refuses to be built without its dependencies", () => {
+  assert.throws(
+    () => createSubtitleMuxHandler({
+      sourceStore: null,
+      artifactsDir: os.tmpdir(),
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /来源配置/u,
+  );
+  assert.throws(
+    () => createSubtitleMuxHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: "relative",
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /产物目录必须是绝对路径/u,
+  );
+  assert.throws(
+    () => createSubtitleMuxHandler({
       sourceStore: { list: async () => ({ roots: [] }) },
       artifactsDir: os.tmpdir(),
     }),

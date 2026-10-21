@@ -138,6 +138,17 @@ export const SKILLS = Object.freeze([
     hint: "需要 FFmpeg/ffprobe；平台画布固定，小尺寸源会被放大并补边。",
   },
   {
+    id: "video-subtitle",
+    name: "字幕封装",
+    category: "production",
+    icon: "⌶",
+    runner: "app",
+    pipelineId: "video-subtitle",
+    requiresMedia: "ffmpeg",
+    desc: "把 SRT 字幕封装成 MP4 内可开关的字幕轨，画面与音轨不重编码，并保留 SRT 文件。",
+    hint: "需要 FFmpeg/ffprobe；字幕必须是合法 SRT，时间码按先后排列。",
+  },
+  {
     id: "media-render",
     name: "影音成片",
     category: "production",

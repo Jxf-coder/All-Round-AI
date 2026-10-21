@@ -468,6 +468,51 @@ export const AUTOMATION_PIPELINES = Object.freeze([
       },
     ],
   },
+  {
+    id: "video-subtitle",
+    name: "字幕封装",
+    desc: "把 SRT 字幕压进 MP4 变为可开关的字幕轨，画面与音轨原样保留，同时留下 SRT 文件。",
+    steps: [
+      {
+        id: "mux",
+        name: "封装字幕",
+        runner: "app",
+        desc: "校验 SRT 时间码与顺序，复制原视频与音轨，只把字幕编码成 mov_text。",
+        action: "media.mux-subtitles",
+        outputs: [
+          { slot: "video", label: "字幕视频" },
+          { slot: "subtitles", label: "字幕文件" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "源文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的绝对路径",
+          },
+          {
+            key: "subtitles",
+            label: "SRT 字幕",
+            type: "text",
+            multiline: true,
+            required: true,
+            maxLength: 8000,
+            hint: "格式：序号（可省略）／00:00:01,000 --> 00:00:03,000／字幕文字，空行分隔",
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "播放字幕轨并核对时间轴后结束本次运行。",
+        after: ["mux"],
+        manualHint: "核对字幕时间轴后点击「我做完了」",
+      },
+    ],
+  },
 ]);
 
 function fail(message) {

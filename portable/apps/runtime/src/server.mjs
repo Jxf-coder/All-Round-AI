@@ -23,6 +23,7 @@ import { createRewriteHandler, createScriptDraftHandler, createTopicPackHandler 
 import {
   createAudioExtractHandler,
   createMediaInventoryHandler,
+  createSubtitleMuxHandler,
   createVideoNormalizeHandler,
   createVideoReframeHandler,
 } from "./automation-media.mjs";
@@ -70,6 +71,7 @@ const ARTIFACT_CONTENT_TYPES = new Map([
   [".m4a", "audio/mp4"],
   [".mp3", "audio/mpeg"],
   [".wav", "audio/wav"],
+  [".srt", "application/x-subrip"],
   [".mp4", "video/mp4"],
   [".mov", "video/quicktime"],
   [".png", "image/png"],
@@ -363,6 +365,12 @@ export async function startLocalRuntime(options = {}) {
         runner: options.mediaRun,
       }),
       ...createVideoReframeHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+        mediaProbe,
+        runner: options.mediaRun,
+      }),
+      ...createSubtitleMuxHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
         mediaProbe,

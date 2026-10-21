@@ -497,6 +497,168 @@ export function createVideoReframeHandler({
   });
 }
 
+export const SRT_LIMITS = Object.freeze({ cues: 500, cueText: 500 });
+
+function parseTimestamp(value) {
+  const match = /^(\d{1,2}):([0-5]\d):([0-5]\d),(\d{3})$/u.exec(String(value).trim());
+  if (!match) return null;
+  const [, hours, minutes, seconds, millis] = match;
+  return (((Number(hours) * 60) + Number(minutes)) * 60 + Number(seconds)) * 1000 + Number(millis);
+}
+
+function formatTimestamp(milliseconds) {
+  const total = Math.max(0, Math.round(milliseconds));
+  const hours = Math.floor(total / 3_600_000);
+  const minutes = Math.floor((total % 3_600_000) / 60_000);
+  const seconds = Math.floor((total % 60_000) / 1_000);
+  const millis = total % 1_000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:`
+    + `${String(seconds).padStart(2, "0")},${String(millis).padStart(3, "0")}`;
+}
+
+// Subtitles arrive as pasted SRT. Parsing and re-emitting normalises indexes
+// and line endings, so a later cue edit cannot silently shift the track.
+export function parseSrt(input) {
+  if (typeof input !== "string" || !input.trim()) throw new Error("字幕内容不能为空");
+  const blocks = input.replace(/\r\n?/gu, "\n").trim().split(/\n{2,}/u);
+  if (blocks.length > SRT_LIMITS.cues) throw new Error(`字幕最多 ${SRT_LIMITS.cues} 条`);
+  const cues = [];
+  blocks.forEach((block, index) => {
+    const lines = block.split("\n").map((line) => line.trimEnd());
+    const timeIndex = /^\d+$/u.test(lines[0]?.trim() ?? "") ? 1 : 0;
+    const timing = /^(\d{1,2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2},\d{3})/u
+      .exec(lines[timeIndex]?.trim() ?? "");
+    if (!timing) {
+      throw new Error(`第 ${index + 1} 条字幕缺少时间码（HH:MM:SS,mmm --> HH:MM:SS,mmm）`);
+    }
+    const start = parseTimestamp(timing[1]);
+    const end = parseTimestamp(timing[2]);
+    if (start === null || end === null || end <= start) {
+      throw new Error(`第 ${index + 1} 条字幕的时间范围无效`);
+    }
+    const text = lines.slice(timeIndex + 1).join("\n").trim();
+    if (!text) throw new Error(`第 ${index + 1} 条字幕没有文字`);
+    if (text.length > SRT_LIMITS.cueText) {
+      throw new Error(`第 ${index + 1} 条字幕超过 ${SRT_LIMITS.cueText} 个字符`);
+    }
+    if (cues.length && start < cues[cues.length - 1].start) {
+      throw new Error("字幕时间码必须按从前到后排列");
+    }
+    cues.push({ start, end, text });
+  });
+  return cues;
+}
+
+export function formatSrt(cues) {
+  if (!Array.isArray(cues) || !cues.length) throw new Error("字幕内容不能为空");
+  return `${cues.map((cue, index) => `${index + 1}\n`
+    + `${formatTimestamp(cue.start)} --> ${formatTimestamp(cue.end)}\n${cue.text}`).join("\n\n")}\n`;
+}
+
+// Soft subtitles keep the picture untouched: the video and audio streams are
+// copied, and only the new subtitle track is encoded to mov_text.
+export function createSubtitleMuxHandler({
+  sourceStore,
+  artifactsDir,
+  mediaProbe,
+  runner,
+} = {}) {
+  if (!sourceStore || typeof sourceStore.list !== "function") {
+    throw new TypeError("字幕封装需要来源配置");
+  }
+  if (typeof artifactsDir !== "string" || !path.isAbsolute(artifactsDir)) {
+    throw new TypeError("产物目录必须是绝对路径");
+  }
+  if (typeof mediaProbe !== "function") throw new TypeError("字幕封装需要媒体工具探测");
+
+  return Object.freeze({
+    "media.mux-subtitles": async ({ run, params }) => {
+      const tools = await mediaProbe();
+      if (!tools?.ffmpeg?.available || !tools?.ffprobe?.available) {
+        throw new Error("未检测到 FFmpeg/ffprobe，请安装后重试（或设置 FFMPEG_PATH/FFPROBE_PATH）");
+      }
+      const cues = parseSrt(params.subtitles);
+      const roots = (await sourceStore.list()).roots;
+      const source = await resolveAllowedFile(params.source, roots);
+
+      let media;
+      try {
+        media = await probeMediaFile({
+          ffprobePath: tools.ffprobe.path,
+          filePath: source,
+          runner,
+        });
+      } catch (error) {
+        throw new Error(`无法读取媒体信息：${error.message}`);
+      }
+      if (!media.video) throw new Error("源文件没有视频轨");
+      const lastEnd = cues[cues.length - 1].end;
+      if (media.duration && lastEnd > Math.ceil(media.duration * 1_000) + 1_000) {
+        throw new Error(`字幕超出视频时长（最后一条结束于 ${(lastEnd / 1_000).toFixed(1)} 秒）`);
+      }
+
+      const directory = path.join(artifactsDir, safeRunName(run.id));
+      await mkdir(directory, { recursive: true });
+      const srtFile = path.join(directory, "subtitles.srt");
+      const videoFile = path.join(directory, "subtitled.mp4");
+      const text = formatSrt(cues);
+      await writeFile(srtFile, text, { encoding: "utf8", mode: 0o600 });
+      await rm(videoFile, { force: true }).catch(() => {});
+
+      const timeoutMs = media.duration
+        ? Math.min(Math.max(Math.ceil(media.duration * 1_000), 60_000), 600_000)
+        : 180_000;
+      try {
+        await runMediaTool({
+          command: tools.ffmpeg.path,
+          args: [
+            "-hide_banner", "-nostdin", "-y",
+            "-i", source,
+            "-i", srtFile,
+            "-map", "0", "-map", "1:0",
+            "-c", "copy", "-c:s", "mov_text",
+            "-metadata:s:s:0", "language=chi",
+            videoFile,
+          ],
+          timeoutMs,
+          runner,
+        });
+      } catch (error) {
+        await rm(videoFile, { force: true }).catch(() => {});
+        await rm(srtFile, { force: true }).catch(() => {});
+        const detail = String(error?.message ?? "未知错误").split(/\r?\n/u)[0].slice(0, 300);
+        throw new Error(`字幕封装失败：${detail}`);
+      }
+
+      let output;
+      try {
+        output = await stat(videoFile);
+      } catch {
+        await rm(srtFile, { force: true }).catch(() => {});
+        throw new Error("字幕封装失败：没有生成输出文件");
+      }
+      if (!output.isFile() || output.size === 0) {
+        await rm(videoFile, { force: true }).catch(() => {});
+        await rm(srtFile, { force: true }).catch(() => {});
+        throw new Error("字幕封装失败：输出文件为空");
+      }
+
+      const srtBytes = Buffer.byteLength(text, "utf8");
+      return {
+        artifacts: [
+          { slot: "video", label: "字幕视频（MP4 / mov_text）", path: videoFile, bytes: output.size },
+          { slot: "subtitles", label: "字幕文件（SRT）", path: srtFile, bytes: srtBytes },
+        ],
+        logs: [
+          `源文件：${path.basename(source)}，时长 ${durationText(media.duration)}`,
+          `字幕 ${cues.length} 条，最后一条结束于 ${(lastEnd / 1_000).toFixed(1)} 秒`,
+          `视频 ${formatSize(output.size)}；SRT ${formatSize(srtBytes)}`,
+        ],
+      };
+    },
+  });
+}
+
 // Audio extraction probes the source first, refuses files without an audio
 // track, and removes a partial output when the encoder fails so the run never
 // points at a broken artifact.

@@ -70,10 +70,10 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 8);
+    assert.equal(body.pipelines.length, 9);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
-        "audio-extract", "video-normalize", "video-reframe"]);
+        "audio-extract", "video-normalize", "video-reframe", "video-subtitle"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -676,6 +676,99 @@ test("the reframe pipeline writes every requested platform canvas", async () => 
       assert.equal(download.headers.get("content-type"), "video/mp4");
       assert.equal((await download.arrayBuffer()).byteLength, 1024);
     }
+  } finally {
+    await app.close();
+  }
+});
+
+test("the subtitle pipeline muxes an SRT and serves both artifacts", async () => {
+  const app = await boot({
+    mediaProbe: async () => ({
+      ffmpeg: { available: true, path: "ffmpeg", version: "test", reason: "" },
+      ffprobe: { available: true, path: "ffprobe", version: "test", reason: "" },
+      checkedAt: "2026-10-21T00:00:00.000Z",
+    }),
+    mediaRun: async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { format_name: "mov,mp4", duration: "10", size: "4096" },
+            streams: [
+              { codec_type: "video", codec_name: "h264", width: 1280, height: 720 },
+              { codec_type: "audio", codec_name: "aac" },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      await writeFile(args[args.length - 1], Buffer.alloc(2048, 8));
+      return { stdout: "", stderr: "" };
+    },
+  });
+  try {
+    const mediaDir = path.join(app.root, "subtitle-source");
+    await mkdir(mediaDir, { recursive: true });
+    const source = path.join(mediaDir, "clip.mp4");
+    await writeFile(source, Buffer.alloc(4096, 1));
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+
+    const srt = "1\n00:00:00,500 --> 00:00:02,000\n第一句\n\n2\n00:00:02,500 --> 00:00:04,000\n第二句\n";
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "video-subtitle",
+        projectId: app.projectId,
+        params: { mux: { source, subtitles: srt } },
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 201, text);
+    const { run } = JSON.parse(text);
+    assert.equal(run.status, "waiting_manual");
+    assert.deepEqual(run.steps.mux.artifacts.map((entry) => entry.slot), ["video", "subtitles"]);
+    assert.equal(run.steps.mux.artifacts[0].bytes, 2048);
+
+    const video = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/video/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(video.status, 200);
+    assert.equal(video.headers.get("content-type"), "video/mp4");
+    assert.equal((await video.arrayBuffer()).byteLength, 2048);
+
+    const subtitles = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/subtitles/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(subtitles.status, 200);
+    assert.equal(subtitles.headers.get("content-type"), "application/x-subrip");
+    assert.equal(await subtitles.text(), srt);
+
+    // The SRT is plain text, so the preview endpoint can show it too.
+    const preview = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/subtitles`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(preview.text, /^1\n00:00:00,500/u);
+
+    const bad = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "video-subtitle",
+        projectId: app.projectId,
+        params: { mux: { source, subtitles: "没有时间码" } },
+      }),
+    });
+    assert.equal(bad.status, 201);
+    const failed = (await bad.json()).run;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /缺少时间码/u);
   } finally {
     await app.close();
   }
