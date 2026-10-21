@@ -2090,6 +2090,8 @@ async function refreshKnowledge() {
 let automationState = null;
 let automationArtifact = null;
 let automationError = null;
+// Operator input survives the re-render that follows every refresh.
+let automationDraft = {};
 
 const RUN_STATUS_LABELS = {
   running: "执行中",
@@ -2161,6 +2163,61 @@ function automationPipelineName(state, id) {
   return (state.pipelines ?? []).find((pipeline) => pipeline.id === id)?.name ?? id;
 }
 
+function automationParamField(pipeline, step, param) {
+  const key = `${pipeline.id}.${step.id}.${param.key}`;
+  const field = element("label", "automation-param");
+  field.append(element("span", "automation-param-label", `${step.name} · ${param.label}`));
+  let input;
+  if (param.type === "toggle") {
+    input = element("input");
+    input.type = "checkbox";
+    input.checked = typeof automationDraft[key] === "boolean" ? automationDraft[key] : param.default === true;
+    input.addEventListener("change", () => {
+      automationDraft[key] = input.checked;
+    });
+  } else if (param.type === "select") {
+    input = element("select");
+    for (const option of param.options ?? []) {
+      const node = element("option", null, option.label);
+      node.value = option.value;
+      input.append(node);
+    }
+    const initial = automationDraft[key] ?? param.default ?? param.options?.[0]?.value ?? "";
+    input.value = String(initial);
+    input.addEventListener("change", () => {
+      automationDraft[key] = input.value;
+    });
+  } else {
+    input = element("input");
+    input.type = param.type === "number" ? "number" : "text";
+    if (param.type === "number") {
+      if (param.min !== undefined) input.min = String(param.min);
+      if (param.max !== undefined) input.max = String(param.max);
+    }
+    if (param.maxLength) input.maxLength = param.maxLength;
+    input.value = String(automationDraft[key] ?? param.default ?? "");
+    input.addEventListener("input", () => {
+      automationDraft[key] = input.value;
+    });
+  }
+  field.append(input);
+  if (param.hint) field.append(element("small", "automation-param-hint", param.hint));
+  return field;
+}
+
+function automationParamsFor(pipeline) {
+  const params = {};
+  for (const step of pipeline.steps ?? []) {
+    for (const param of step.params ?? []) {
+      const key = `${pipeline.id}.${step.id}.${param.key}`;
+      if (automationDraft[key] === undefined || automationDraft[key] === "") continue;
+      params[step.id] ??= {};
+      params[step.id][param.key] = automationDraft[key];
+    }
+  }
+  return params;
+}
+
 function renderAutomationBody() {
   panelBody.replaceChildren();
   const state = automationState;
@@ -2187,12 +2244,21 @@ function renderAutomationBody() {
       () => void automationAction("/api/automation/runs", {
         pipelineId: pipeline.id,
         projectId: currentProjectId,
+        params: automationParamsFor(pipeline),
       }),
     );
     if (!currentProjectId || state.busy) start.disabled = true;
     head.append(start);
     card.append(head);
     if (pipeline.desc) card.append(element("p", "panel-note", pipeline.desc));
+    const paramFields = (pipeline.steps ?? []).flatMap(
+      (step) => (step.params ?? []).map((param) => ({ step, param })),
+    );
+    if (paramFields.length) {
+      const params = element("div", "automation-params");
+      for (const { step, param } of paramFields) params.append(automationParamField(pipeline, step, param));
+      card.append(params);
+    }
     const steps = element("ol", "automation-steps");
     for (const step of pipeline.steps) {
       const item = element("li", `runner-${step.runner}`);
@@ -2377,6 +2443,7 @@ function showPanelView(panel, label) {
     automationState = null;
     automationArtifact = null;
     automationError = null;
+    automationDraft = {};
     renderAutomationBody();
     void refreshAutomation();
     return;

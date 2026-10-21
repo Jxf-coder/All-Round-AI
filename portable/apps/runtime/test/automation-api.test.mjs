@@ -83,11 +83,21 @@ test("a knowledge run writes both artifacts and waits for the operator", async (
     const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
       method: "POST",
       headers: app.admin,
-      body: JSON.stringify({ pipelineId: "knowledge-brief", projectId: app.projectId }),
+      body: JSON.stringify({
+        pipelineId: "knowledge-brief",
+        projectId: app.projectId,
+        params: {
+          snapshot: { maxCards: 5, includeGaps: false },
+          brief: { title: "验收简报" },
+        },
+      }),
     });
     assert.equal(response.status, 201);
     const { run } = await response.json();
     assert.equal(run.status, "waiting_manual");
+    assert.equal(run.params.snapshot.maxCards, 5);
+    assert.equal(run.params.snapshot.includeGaps, false);
+    assert.equal(run.params.brief.title, "验收简报");
     assert.equal(run.steps.snapshot.status, "done");
     assert.equal(run.steps.brief.status, "done");
     assert.equal(run.steps.review.status, "waiting_manual");
@@ -100,8 +110,9 @@ test("a knowledge run writes both artifacts and waits for the operator", async (
     );
     assert.equal(brief.status, 200);
     const briefBody = await brief.json();
-    assert.match(briefBody.text, new RegExp(`^# 知识简报 · ${app.projectId}`, "u"));
+    assert.match(briefBody.text, /^# 知识简报 · 验收简报/u);
     assert.match(briefBody.text, /## 概览/u);
+    assert.match(briefBody.text, /本次运行未纳入缺口/u);
     assert.ok(briefBody.bytes > 0);
 
     const snapshot = await (await fetch(
@@ -111,6 +122,8 @@ test("a knowledge run writes both artifacts and waits for the operator", async (
     const parsed = JSON.parse(snapshot.text);
     assert.equal(parsed.projectId, app.projectId);
     assert.equal(parsed.stats.cards, 0);
+    assert.equal(parsed.includeGaps, false);
+    assert.deepEqual(parsed.gaps, []);
 
     const missingArtifact = await fetch(
       `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/nope`,
@@ -180,13 +193,26 @@ test("invalid automation requests are refused and audited", async () => {
     });
     assert.equal(missingRun.status, 404);
 
+    const badParams = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "knowledge-brief",
+        projectId: app.projectId,
+        params: { snapshot: { maxCards: 999 } },
+      }),
+    });
+    assert.equal(badParams.status, 400);
+    assert.match((await badParams.json()).error, /不能大于 100/u);
+
     const trail = await (await fetch(`${app.runtime.url}/api/audit?limit=10`, {
       headers: { cookie: app.admin.cookie },
     })).json();
     const denials = trail.entries.filter((entry) => entry.action === "automation.run");
-    assert.deepEqual(denials.map((entry) => entry.outcome), ["denied", "denied"]);
-    assert.match(denials[0].detail, /项目不存在/u);
-    assert.match(denials[1].detail, /没有这条产线/u);
+    assert.deepEqual(denials.map((entry) => entry.outcome), ["denied", "denied", "denied"]);
+    assert.match(denials[0].detail, /不能大于 100/u);
+    assert.match(denials[1].detail, /项目不存在/u);
+    assert.match(denials[2].detail, /没有这条产线/u);
   } finally {
     await app.close();
   }

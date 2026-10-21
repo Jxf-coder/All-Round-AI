@@ -257,6 +257,12 @@ html.dark .fast-toggle.active{background:rgba(108,132,255,.2);border-color:rgba(
 .automation-steps li{counter-increment:step;padding:1px 7px;border-radius:999px;background:#eef1f6;color:#4c5b70;font-size:9px}
 .automation-steps li::before{content:counter(step) ". "}
 .automation-steps li.runner-manual{background:#fff5e6;color:#b26a00}
+.automation-params{display:flex;flex-wrap:wrap;gap:6px}
+.automation-param{display:flex;flex-direction:column;gap:2px;min-width:120px;font-size:9px;color:#4c5b70}
+.automation-param-label{color:#7d8a9e}
+.automation-param input,.automation-param select{padding:3px 6px;border:1px solid var(--hairline);border-radius:6px;background:#fff;color:#2f3f57;font-size:10px;font-family:inherit}
+.automation-param input[type="checkbox"]{width:14px;height:14px;padding:0}
+.automation-param-hint{color:#8a97a8;font-size:8.5px}
 .automation-status{padding:1px 6px;border-radius:999px;background:#eef1f6;color:#7d8a9e;font-size:9px}
 .automation-status.running{background:#e8f1ff;color:#2f6fdd}
 .automation-status.waiting_manual{background:#fff5e6;color:#b26a00}
@@ -299,3 +305,5 @@ html.dark .automation-status.waiting_manual{background:#3a2c12;color:#f3c07a}
 html.dark .automation-status.done{background:#123a2b;color:#5fe0aa}
 html.dark .automation-status.failed{background:#3d1b1b;color:#ff8a80}
 html.dark .automation-step{color:#d0def8a8}
+html.dark .automation-param{color:#d0def8a8}
+html.dark .automation-param input,html.dark .automation-param select{background:#0d1929;border-color:var(--hairline);color:#dce4ff}

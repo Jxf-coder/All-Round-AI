@@ -45,6 +45,23 @@ export const AUTOMATION_PIPELINES = Object.freeze([
         runner: "app",
         action: "knowledge.snapshot",
         outputs: [{ slot: "snapshot", label: "知识快照" }],
+        params: [
+          {
+            key: "maxCards",
+            label: "最多纳入知识卡",
+            type: "number",
+            default: 20,
+            min: 1,
+            max: 100,
+            hint: "超出部分仍留在知识库，简报只取最新的这些",
+          },
+          {
+            key: "includeGaps",
+            label: "纳入未关闭缺口",
+            type: "toggle",
+            default: true,
+          },
+        ],
       },
       {
         id: "brief",
@@ -54,6 +71,16 @@ export const AUTOMATION_PIPELINES = Object.freeze([
         action: "knowledge.brief",
         after: ["snapshot"],
         outputs: [{ slot: "brief", label: "知识简报" }],
+        params: [
+          {
+            key: "title",
+            label: "简报标题",
+            type: "text",
+            default: "",
+            maxLength: 80,
+            hint: "留空使用项目 id",
+          },
+        ],
       },
       {
         id: "review",
@@ -69,6 +96,85 @@ export const AUTOMATION_PIPELINES = Object.freeze([
 
 function fail(message) {
   throw new TypeError(message);
+}
+
+const PARAM_TYPES = new Set(["text", "number", "toggle", "select"]);
+
+// Params are declared once in the definition and stored per run, so a later
+// change to the definition cannot rewrite what a finished run was asked for.
+function coerceParam(definition, value) {
+  const label = definition.label || definition.key;
+  if (definition.type === "toggle") {
+    if (value === undefined || value === null) return definition.default === true;
+    if (typeof value !== "boolean") throw new AutomationError("BAD_PARAM", `${label}必须是开关值`);
+    return value;
+  }
+  if (definition.type === "number") {
+    if (value === undefined || value === null || value === "") return definition.default;
+    const number = typeof value === "number" ? value : Number(String(value).trim());
+    if (!Number.isFinite(number)) throw new AutomationError("BAD_PARAM", `${label}必须是数字`);
+    if (definition.min !== undefined && number < definition.min) {
+      throw new AutomationError("BAD_PARAM", `${label}不能小于 ${definition.min}`);
+    }
+    if (definition.max !== undefined && number > definition.max) {
+      throw new AutomationError("BAD_PARAM", `${label}不能大于 ${definition.max}`);
+    }
+    return number;
+  }
+  if (definition.type === "select") {
+    const raw = value === undefined || value === null || value === "" ? definition.default : value;
+    if (typeof raw !== "string" || !definition.options.some((option) => option.value === raw)) {
+      throw new AutomationError("BAD_PARAM", `${label}选项无效`);
+    }
+    return raw;
+  }
+  if (value === undefined || value === null) return definition.default ?? "";
+  if (typeof value !== "string") throw new AutomationError("BAD_PARAM", `${label}必须是文本`);
+  const text = value.trim();
+  const maxLength = definition.maxLength ?? 200;
+  if (text.length > maxLength) throw new AutomationError("BAD_PARAM", `${label}不能超过 ${maxLength} 个字符`);
+  if (definition.required && text === "") throw new AutomationError("BAD_PARAM", `${label}不能为空`);
+  return text;
+}
+
+function validateParam(param, stepId, keys) {
+  if (!param || typeof param !== "object") fail(`步骤 ${stepId} 的参数必须是对象`);
+  if (typeof param.key !== "string" || !/^[a-zA-Z][a-zA-Z0-9_]{0,40}$/u.test(param.key)) {
+    fail(`步骤 ${stepId} 的参数 key 无效`);
+  }
+  if (keys.has(param.key)) fail(`步骤 ${stepId} 的参数 key 重复：${param.key}`);
+  keys.add(param.key);
+  if (!PARAM_TYPES.has(param.type)) fail(`步骤 ${stepId} 的参数 ${param.key} 类型无效`);
+  if (typeof param.label !== "string" || param.label.trim() === "") {
+    fail(`步骤 ${stepId} 的参数 ${param.key} 缺少名称`);
+  }
+  if (param.type === "select") {
+    if (!Array.isArray(param.options) || param.options.length === 0
+      || param.options.some((option) => typeof option?.value !== "string" || typeof option?.label !== "string")) {
+      fail(`步骤 ${stepId} 的参数 ${param.key} 选项无效`);
+    }
+  }
+  if (param.type === "number") {
+    for (const bound of ["min", "max"]) {
+      if (param[bound] !== undefined && !Number.isFinite(param[bound])) {
+        fail(`步骤 ${stepId} 的参数 ${param.key} 的 ${bound} 无效`);
+      }
+    }
+    if (param.min !== undefined && param.max !== undefined && param.min > param.max) {
+      fail(`步骤 ${stepId} 的参数 ${param.key} 范围无效`);
+    }
+  }
+  if (param.maxLength !== undefined
+    && (!Number.isSafeInteger(param.maxLength) || param.maxLength < 1 || param.maxLength > 1_000)) {
+    fail(`步骤 ${stepId} 的参数 ${param.key} 长度上限无效`);
+  }
+  if (param.default !== undefined) {
+    try {
+      coerceParam(param, param.default);
+    } catch (error) {
+      fail(`步骤 ${stepId} 的参数 ${param.key} 默认值无效：${error.message}`);
+    }
+  }
 }
 
 function validateStep(step, index, seen) {
@@ -89,6 +195,11 @@ function validateStep(step, index, seen) {
   if (step.outputs !== undefined && (!Array.isArray(step.outputs)
     || step.outputs.some((output) => typeof output?.slot !== "string" || output.slot === ""))) {
     fail(`步骤 ${step.id} 的 outputs 无效`);
+  }
+  if (step.params !== undefined) {
+    if (!Array.isArray(step.params)) fail(`步骤 ${step.id} 的 params 必须是数组`);
+    const keys = new Set();
+    for (const param of step.params) validateParam(param, step.id, keys);
   }
   return index;
 }
@@ -132,6 +243,20 @@ export function describePipeline(definition) {
       runner: step.runner,
       ...(step.after ? { after: [...step.after] } : {}),
       ...(step.outputs ? { outputs: step.outputs.map((output) => ({ ...output })) } : {}),
+      ...(step.params ? {
+        params: step.params.map((param) => ({
+          key: param.key,
+          label: param.label,
+          type: param.type,
+          ...(param.default !== undefined ? { default: param.default } : {}),
+          ...(param.required ? { required: true } : {}),
+          ...(param.min !== undefined ? { min: param.min } : {}),
+          ...(param.max !== undefined ? { max: param.max } : {}),
+          ...(param.maxLength !== undefined ? { maxLength: param.maxLength } : {}),
+          ...(param.options ? { options: param.options.map((option) => ({ ...option })) } : {}),
+          ...(param.hint ? { hint: param.hint } : {}),
+        })),
+      } : {}),
       ...(step.manualHint ? { manualHint: step.manualHint } : {}),
     })),
   };
@@ -139,6 +264,39 @@ export function describePipeline(definition) {
 
 export function pipelineById(id, pipelines = AUTOMATION_PIPELINES) {
   return pipelines.find((definition) => definition.id === id) ?? null;
+}
+
+// Validates the operator's input against the declared params, fills defaults
+// and returns one plain object per step. Unknown steps or keys are refused
+// instead of being silently dropped.
+export function resolveRunParams(definition, input = {}) {
+  if (input === undefined || input === null) input = {};
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new AutomationError("BAD_PARAM", "参数格式无效");
+  }
+  const result = {};
+  for (const step of definition.steps) {
+    if (!step.params?.length) continue;
+    const supplied = input[step.id] ?? {};
+    if (typeof supplied !== "object" || Array.isArray(supplied)) {
+      throw new AutomationError("BAD_PARAM", `步骤「${step.name}」的参数格式无效`);
+    }
+    for (const key of Object.keys(supplied)) {
+      if (!step.params.some((param) => param.key === key)) {
+        throw new AutomationError("BAD_PARAM", `步骤「${step.name}」没有参数 ${key}`);
+      }
+    }
+    const values = {};
+    for (const param of step.params) values[param.key] = coerceParam(param, supplied[param.key]);
+    result[step.id] = values;
+  }
+  for (const stepId of Object.keys(input)) {
+    const step = definition.steps.find((entry) => entry.id === stepId);
+    if (!step || !step.params?.length) {
+      throw new AutomationError("BAD_PARAM", `产线没有可配置步骤 ${stepId}`);
+    }
+  }
+  return result;
 }
 
 function isRunLike(value) {
@@ -150,6 +308,8 @@ function isRunLike(value) {
     && RUN_STATUSES.includes(value.status)
     && typeof value.steps === "object"
     && value.steps !== null
+    && (value.params === undefined
+      || (typeof value.params === "object" && value.params !== null && !Array.isArray(value.params)))
     && Object.values(value.steps).every((step) => Boolean(step)
       && typeof step === "object"
       && STEP_STATUSES.includes(step.status)
@@ -305,7 +465,7 @@ export function createAutomationEngine({
       try {
         const handler = handlers[step.action];
         if (typeof handler !== "function") throw new Error(`没有注册的步骤处理器：${step.action}`);
-        const outcome = await handler({ run, step, definition }) ?? {};
+        const outcome = await handler({ run, step, definition, params: run.params?.[step.id] ?? {} }) ?? {};
         state.status = "done";
         state.finishedAt = iso();
         state.artifacts = cleanArtifacts(outcome.artifacts);
@@ -348,12 +508,13 @@ export function createAutomationEngine({
   }
 
   return Object.freeze({
-    async start({ pipelineId, projectId, actor = null } = {}) {
+    async start({ pipelineId, projectId, actor = null, params = {} } = {}) {
       const definition = definitions.get(pipelineId);
       if (!definition) throw new AutomationError("UNKNOWN_PIPELINE", "没有这条产线");
       if (typeof projectId !== "string" || projectId.trim() === "") {
         throw new AutomationError("BAD_PROJECT", "请先选择项目");
       }
+      const resolvedParams = resolveRunParams(definition, params);
       const at = iso();
       const run = {
         id: generateId(),
@@ -365,6 +526,7 @@ export function createAutomationEngine({
         finishedAt: null,
         currentStep: null,
         startedBy: typeof actor === "string" ? actor.slice(0, 200) : null,
+        params: resolvedParams,
         definition: describePipeline(definition),
         steps: Object.fromEntries(definition.steps.map((step) => [step.id, emptyState()])),
         error: null,

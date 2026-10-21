@@ -9,6 +9,7 @@ import {
   createAutomationEngine,
   createAutomationStore,
   describePipeline,
+  resolveRunParams,
   validatePipelines,
 } from "../src/automation.mjs";
 
@@ -30,6 +31,35 @@ const AUTO = {
   steps: [
     { id: "a", name: "第一步", desc: "", runner: "app", action: "test.a" },
     { id: "b", name: "第二步", desc: "", runner: "app", action: "test.b" },
+  ],
+};
+
+const PARAMETRIC = {
+  id: "parametric",
+  name: "参数产线",
+  desc: "测试用",
+  steps: [
+    {
+      id: "run",
+      name: "执行",
+      desc: "",
+      runner: "app",
+      action: "test.run",
+      params: [
+        { key: "count", label: "数量", type: "number", default: 3, min: 1, max: 5 },
+        { key: "note", label: "备注", type: "text", default: "", maxLength: 10 },
+        { key: "enabled", label: "启用", type: "toggle", default: true },
+        {
+          key: "mode",
+          label: "模式",
+          type: "select",
+          default: "a",
+          options: [{ value: "a", label: "A" }, { value: "b", label: "B" }],
+        },
+        { key: "requiredNote", label: "必填", type: "text", required: true, default: "x" },
+      ],
+    },
+    { id: "review", name: "确认", desc: "", runner: "manual", after: ["run"] },
   ],
 };
 
@@ -265,5 +295,90 @@ test("starting validates the pipeline and the project", async () => {
       (error) => error.code === "BAD_PROJECT",
     );
     await assert.rejects(engine.cancel({ runId: "run_missing" }), (error) => error.status === 404);
+  });
+});
+
+test("step params are validated, defaulted and coerced before a run starts", () => {
+  assert.equal(validatePipelines([PARAMETRIC])[0], PARAMETRIC);
+  assert.deepEqual(resolveRunParams(PARAMETRIC, {}), {
+    run: { count: 3, note: "", enabled: true, mode: "a", requiredNote: "x" },
+  });
+  assert.deepEqual(resolveRunParams(PARAMETRIC, {
+    run: { count: "4", note: "  hi  ", enabled: false, mode: "b", requiredNote: "y" },
+  }), {
+    run: { count: 4, note: "hi", enabled: false, mode: "b", requiredNote: "y" },
+  });
+
+  const rejected = [
+    [{ run: { nope: 1 } }, /没有参数 nope/u],
+    [{ missing: { count: 1 } }, /没有可配置步骤 missing/u],
+    [{ run: { count: 9 } }, /不能大于 5/u],
+    [{ run: { count: 0 } }, /不能小于 1/u],
+    [{ run: { count: "abc" } }, /必须是数字/u],
+    [{ run: { enabled: "yes" } }, /必须是开关值/u],
+    [{ run: { mode: "c" } }, /选项无效/u],
+    [{ run: { note: "12345678901" } }, /不能超过 10 个字符/u],
+    [{ run: { requiredNote: "   " } }, /不能为空/u],
+  ];
+  for (const [input, pattern] of rejected) {
+    assert.throws(() => resolveRunParams(PARAMETRIC, input), pattern);
+  }
+  assert.throws(() => resolveRunParams(PARAMETRIC, "nope"), /参数格式无效/u);
+
+  const described = describePipeline(PARAMETRIC);
+  assert.deepEqual(described.steps[0].params.map((param) => param.key), [
+    "count", "note", "enabled", "mode", "requiredNote",
+  ]);
+  assert.equal(described.steps[0].params[3].options.length, 2);
+});
+
+test("a definition with broken params is refused up front", () => {
+  const stepWith = (params) => ({ ...PARAMETRIC, steps: [{ ...PARAMETRIC.steps[0], params }] });
+  assert.throws(() => validatePipelines([stepWith([{ key: "x", label: "X", type: "date" }])]), /类型无效/u);
+  assert.throws(
+    () => validatePipelines([stepWith([
+      { key: "x", label: "X", type: "text" },
+      { key: "x", label: "Y", type: "text" },
+    ])]),
+    /参数 key 重复/u,
+  );
+  assert.throws(
+    () => validatePipelines([stepWith([{ key: "x", label: "X", type: "number", default: 9, max: 5 }])]),
+    /默认值无效/u,
+  );
+  assert.throws(() => validatePipelines([stepWith([{ key: "x", label: "X", type: "select" }])]), /选项无效/u);
+  assert.throws(() => validatePipelines([stepWith([{ key: "x", label: "X", type: "text", maxLength: 0 }])]), /长度上限无效/u);
+});
+
+test("run params reach the handler and survive a reload", async () => {
+  await withStore(async ({ store }) => {
+    const seen = [];
+    const engine = createAutomationEngine({
+      store,
+      pipelines: [PARAMETRIC],
+      handlers: {
+        "test.run": async ({ params }) => {
+          seen.push(params);
+          return {};
+        },
+      },
+    });
+    const run = await engine.start({
+      pipelineId: "parametric",
+      projectId: "project-1",
+      params: { run: { count: 2, mode: "b" } },
+    });
+    assert.deepEqual(seen[0], { count: 2, note: "", enabled: true, mode: "b", requiredNote: "x" });
+    assert.deepEqual(run.params.run, { count: 2, note: "", enabled: true, mode: "b", requiredNote: "x" });
+    assert.equal(run.status, "waiting_manual");
+
+    const reloaded = await createAutomationStore({ filePath: store.path }).read(run.id);
+    assert.equal(reloaded.params.run.count, 2);
+
+    // Old runs written before params existed stay readable.
+    const legacy = await engine.read(run.id);
+    delete legacy.params;
+    await store.save(legacy);
+    assert.equal((await engine.read(run.id)).params, undefined);
   });
 });

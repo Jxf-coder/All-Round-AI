@@ -788,6 +788,7 @@ export async function startLocalRuntime(options = {}) {
         pipelineId: body.pipelineId,
         projectId,
         actor: actor.id,
+        params: body.params,
       });
       await recordAudit({
         actor: actor.id,
