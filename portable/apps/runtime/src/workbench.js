@@ -2247,10 +2247,13 @@ function renderAutomationBody() {
         params: automationParamsFor(pipeline),
       }),
     );
-    if (!currentProjectId || state.busy) start.disabled = true;
+    if (!currentProjectId || state.busy || pipeline.enabled === false) start.disabled = true;
     head.append(start);
     card.append(head);
     if (pipeline.desc) card.append(element("p", "panel-note", pipeline.desc));
+    if (pipeline.enabled === false) {
+      card.append(element("p", "device-error", "对应技能已停用，去 Skill 面板重新启用后才能开跑。"));
+    }
     const paramFields = (pipeline.steps ?? []).flatMap(
       (step) => (step.params ?? []).map((param) => ({ step, param })),
     );
@@ -2348,6 +2351,165 @@ function renderPlaceholderPanel(label) {
     `${label}工作区的完整功能正在按阶段迁移；此原型先验证工作台导航、项目与知识框架。`));
 }
 
+// ---------------------------------------------------------------------------
+// Skill panel (rail → Skill). The catalog comes from the runtime; a switch is
+// installation-wide and refuses the matching entry point instead of only
+// hiding a card. Availability is computed on the server from paired devices,
+// so a desk skill says exactly which capability is still missing.
+// ---------------------------------------------------------------------------
+let skillState = null;
+let skillError = null;
+let skillBusyId = null;
+let skillCategory = "all";
+let skillQuery = "";
+const SKILL_RUNNER_LABELS = { app: "运行时", desk: "本机设备" };
+
+async function refreshSkills() {
+  skillError = null;
+  try {
+    const response = await apiRequest("/api/skills");
+    if (!response?.ok) throw new Error("skills unavailable");
+    skillState = await response.json();
+  } catch {
+    skillState = null;
+    skillError = "连不上运行时，稍后再试。";
+  }
+  if (activePanel === "skills") renderSkillBody();
+}
+
+async function toggleSkill(skill) {
+  if (skill.comingSoon || skillBusyId) return;
+  skillBusyId = skill.id;
+  skillError = null;
+  renderSkillBody();
+  try {
+    const response = await apiRequest("/api/skills/toggle", {
+      method: "POST",
+      body: JSON.stringify({ id: skill.id, enabled: !skill.enabled }),
+    });
+    const payload = await response?.json().catch(() => ({}));
+    if (!response?.ok) skillError = payload?.error || "开关失败。";
+    else skillState = payload;
+  } catch {
+    skillError = "连不上运行时，稍后再试。";
+  } finally {
+    skillBusyId = null;
+    renderSkillBody();
+  }
+}
+
+function skillCategoryLabel(id) {
+  return skillState?.categories?.find((category) => category.id === id)?.label ?? id;
+}
+
+function skillAvailabilityText(skill) {
+  if (skill.comingSoon) return skill.reason;
+  if (skill.runner === "desk" && skill.available) {
+    return `已配对 ${skill.devices} 台设备${skill.online ? `（在线 ${skill.online}）` : "（当前离线）"}`;
+  }
+  return skill.reason || "可用";
+}
+
+function skillMatches(skill) {
+  if (skillCategory !== "all" && skill.category !== skillCategory) return false;
+  const query = skillQuery.trim().toLowerCase();
+  if (!query) return true;
+  return [skill.name, skill.desc, skill.hint]
+    .some((field) => String(field ?? "").toLowerCase().includes(query));
+}
+
+function renderSkillGrid() {
+  const grid = $("#skill-grid");
+  if (!grid || !skillState) return;
+  const skills = skillState.skills.filter(skillMatches);
+  grid.replaceChildren();
+  if (!skills.length) {
+    grid.append(element("p", "knowledge-empty", "没有匹配的技能。"));
+    return;
+  }
+  for (const skill of skills) {
+    const card = element("article",
+      `skill-card${skill.enabled ? " enabled" : ""}${skill.available ? "" : " unavailable"}`);
+    const head = element("div", "skill-card-head");
+    head.append(element("span", "skill-icon", skill.icon));
+    const title = element("div", "skill-title");
+    title.append(
+      element("b", null, skill.name),
+      element("small", null, `${skillCategoryLabel(skill.category)} · ${SKILL_RUNNER_LABELS[skill.runner] ?? skill.runner}`),
+    );
+    const toggle = element("button",
+      `skill-switch${skill.enabled ? " on" : ""}`,
+      skill.comingSoon ? "未上线" : skill.enabled ? "已启用" : "已停用");
+    toggle.type = "button";
+    toggle.setAttribute("aria-pressed", String(skill.enabled));
+    toggle.disabled = Boolean(skill.comingSoon) || skillBusyId !== null;
+    toggle.addEventListener("click", () => void toggleSkill(skill));
+    head.append(title, toggle);
+    card.append(head);
+    card.append(element("p", "skill-desc", skill.desc));
+    if (skill.hint) card.append(element("p", "skill-hint", skill.hint));
+    const foot = element("div", "skill-foot");
+    foot.append(element("span", `skill-ready${skill.available ? "" : " off"}`, skillAvailabilityText(skill)));
+    card.append(foot);
+    if (!skill.available && skill.howTo) {
+      card.append(element("p", "skill-howto", skill.howTo));
+    }
+    grid.append(card);
+  }
+}
+
+function renderSkillBody() {
+  panelBody.replaceChildren();
+  if (skillError) panelBody.append(element("p", "device-error", skillError));
+  if (!skillState) {
+    if (!skillError) panelBody.append(element("p", "panel-note", "正在读取技能目录…"));
+    return;
+  }
+  const stats = skillState.stats;
+  const row = element("div", "skill-stats");
+  for (const [label, value] of [
+    ["技能总数", stats.total],
+    ["已启用", stats.enabled],
+    ["可用", stats.available],
+    ["迁移中", stats.comingSoon],
+  ]) {
+    const cell = element("div", "knowledge-stat");
+    cell.append(element("b", null, String(value)), element("span", null, label));
+    row.append(cell);
+  }
+  panelBody.append(row);
+
+  const search = element("input", "skill-search");
+  search.type = "search";
+  search.placeholder = "搜索技能、用途或说明";
+  search.setAttribute("aria-label", "搜索技能");
+  search.value = skillQuery;
+  search.addEventListener("input", () => {
+    skillQuery = search.value;
+    renderSkillGrid();
+  });
+
+  const tabs = element("div", "skill-tabs");
+  for (const category of skillState.categories) {
+    const button = element("button",
+      `skill-tab${skillCategory === category.id ? " active" : ""}`, category.label);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      skillCategory = category.id;
+      for (const node of tabs.querySelectorAll(".skill-tab")) {
+        node.classList.toggle("active", node === button);
+      }
+      renderSkillGrid();
+    });
+    tabs.append(button);
+  }
+
+  const grid = element("div", "skill-grid");
+  grid.id = "skill-grid";
+  panelBody.append(search, tabs, grid);
+  renderSkillGrid();
+}
+
 // Switching between the chat view and a rail panel swaps what the main area
 // shows; the composer only belongs to the chat.
 // Which view the main area is showing, so switching project can refresh it
@@ -2421,6 +2583,17 @@ function showPanelView(panel, label) {
   composer.hidden = true;
   welcome.classList.add("hidden");
   panelTitle.textContent = label;
+  if (panel === "skills") {
+    panelCopy.textContent = "开关对这个安装生效：停用后对应入口会直接拒绝，而不只是隐藏卡片。";
+    skillState = null;
+    skillError = null;
+    skillBusyId = null;
+    skillCategory = "all";
+    skillQuery = "";
+    renderSkillBody();
+    void refreshSkills();
+    return;
+  }
   if (panel === "devices") {
     panelCopy.textContent = "把本机 desk 代理配对到工作台。工作台只保存令牌哈希，令牌本身留在设备上。";
     deviceState = null;

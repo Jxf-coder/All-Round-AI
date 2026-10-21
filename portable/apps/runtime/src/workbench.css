@@ -307,3 +307,42 @@ html.dark .automation-status.failed{background:#3d1b1b;color:#ff8a80}
 html.dark .automation-step{color:#d0def8a8}
 html.dark .automation-param{color:#d0def8a8}
 html.dark .automation-param input,html.dark .automation-param select{background:#0d1929;border-color:var(--hairline);color:#dce4ff}
+.skill-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.skill-search{width:100%;padding:7px 9px;border:1px solid var(--hairline);border-radius:9px;background:#fff;color:var(--ink);font-family:inherit;font-size:11px}
+.skill-search:focus{outline:none;border-color:#a8b6ff}
+.skill-tabs{display:flex;flex-wrap:wrap;gap:5px}
+.skill-tab{padding:3px 9px;border:1px solid var(--hairline);border-radius:999px;background:transparent;color:#8290a1;font-family:inherit;font-size:10px;cursor:pointer}
+.skill-tab:hover{background:var(--chip);color:var(--ink)}
+.skill-tab.active{background:rgba(37,67,255,.1);border-color:rgba(37,67,255,.28);color:#1f37d6;font-weight:600}
+.skill-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:start}
+.skill-card{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--hairline);border-radius:10px;background:#fff}
+.skill-card.unavailable{background:#fbfcfe}
+.skill-card-head{display:flex;align-items:flex-start;gap:8px}
+.skill-icon{flex:none;width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:#eef1f6;color:#4c5b70;font-size:12px}
+.skill-card.enabled .skill-icon{background:rgba(37,67,255,.1);color:#2543ff}
+.skill-title{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.skill-title b{font-size:11px;color:#2f3f57}
+.skill-title small{font-size:9px;color:#8a97a8}
+.skill-switch{flex:none;padding:3px 8px;border:1px solid var(--hairline);border-radius:999px;background:#eef1f6;color:#7d8a9e;font-family:inherit;font-size:9px;cursor:pointer}
+.skill-switch.on{background:#e7f8f0;border-color:#bfe9d6;color:#1d9b6c;font-weight:600}
+.skill-switch:disabled{cursor:not-allowed;opacity:.6}
+.skill-desc{margin:0;color:#5c6b7f;font-size:10.5px;line-height:1.6}
+.skill-hint{margin:0;color:#8a97a8;font-size:9.5px;line-height:1.55}
+.skill-foot{display:flex;align-items:center;gap:6px}
+.skill-ready{font-size:9px;color:#1d9b6c}
+.skill-ready.off{color:#b26a00}
+.skill-howto{margin:0;color:#8a97a8;font-size:9px;line-height:1.5}
+html.dark .skill-search{background:#0f1a2c;color:var(--ink);border-color:rgba(255,255,255,.1)}
+html.dark .skill-tab{color:#d0def8a8;border-color:rgba(255,255,255,.1)}
+html.dark .skill-tab.active{background:rgba(108,132,255,.18);border-color:rgba(108,132,255,.4);color:#cdd8ff}
+html.dark .skill-card{background:#101d30b8;border-color:var(--hairline)}
+html.dark .skill-card.unavailable{background:#0d1929a6}
+html.dark .skill-icon{background:#ffffff14;color:#d0def8a8}
+html.dark .skill-card.enabled .skill-icon{background:rgba(108,132,255,.2);color:#cdd8ff}
+html.dark .skill-title b{color:#dce4ff}
+html.dark .skill-title small,html.dark .skill-hint,html.dark .skill-howto{color:#d0def8a8}
+html.dark .skill-desc{color:#e8effcb8}
+html.dark .skill-switch{background:#ffffff14;color:#d0def8a8;border-color:rgba(255,255,255,.1)}
+html.dark .skill-switch.on{background:#123a2b;border-color:#1d5c45;color:#5fe0aa}
+html.dark .skill-ready.off{color:#f3c07a}
+@media(max-width:900px){.skill-grid{grid-template-columns:1fr}.skill-stats{grid-template-columns:repeat(2,1fr)}}

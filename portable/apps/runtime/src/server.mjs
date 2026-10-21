@@ -22,6 +22,7 @@ import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
 import { buildKnowledgeBlock, createKnowledgeStore } from "./knowledge.mjs";
+import { createSkillStore, skillById, skillForCommand, skillForPipeline } from "./skills.mjs";
 import { createHandover, latestHandover, readHandover } from "./handover.mjs";
 import { forbiddenTerms, cleanIntake, DEFAULT_CATEGORIES, standardCardBody } from "./intake.mjs";
 import { createSourceStore, resolveScoutRoot } from "./sources.mjs";
@@ -242,6 +243,10 @@ export async function startLocalRuntime(options = {}) {
     ?? await createMemoryStore(path.join(directories.config, "memory.json"));
   const knowledgeStore = options.knowledgeStore
     ?? await createKnowledgeStore(path.join(directories.config, "knowledge.json"));
+  // Skill switches are installation-wide: disabling "本机命令" removes the
+  // capability for every operator instead of only hiding a card.
+  const skillsStore = options.skillStore
+    ?? await createSkillStore(path.join(directories.config, "skills.json"));
   // Source roots and scout runs are installation-wide: a mounted share is the
   // same share for every project, and scout history is not project knowledge.
   const sourceStore = options.sourceStore
@@ -645,6 +650,12 @@ export async function startLocalRuntime(options = {}) {
         json(ctx.response, 400, { error: "不支持的命令类型" });
         return true;
       }
+      const requiredSkill = await disabledSkill(skillForCommand(type));
+      if (requiredSkill) {
+        await record("denied", `技能已停用：${requiredSkill.name}`);
+        json(ctx.response, 403, { error: `技能已停用：${requiredSkill.name}` });
+        return true;
+      }
       const payload = {};
       let ttlMs;
       if (type === "screen.capture") {
@@ -763,6 +774,65 @@ export async function startLocalRuntime(options = {}) {
     return true;
   });
 
+  // Skill catalog. Availability reflects what the installation can actually do:
+  // app skills are ready, desk skills need a paired agent that advertised the
+  // capability, and later-phase entries say they are not switchable yet.
+  async function skillList() {
+    return skillsStore.list(await deviceRegistry.list());
+  }
+
+  // A disabled switch refuses with a stable message instead of silently doing
+  // nothing, so the caller knows which card to turn back on.
+  async function disabledSkill(id) {
+    if (!id) return null;
+    return (await skillsStore.isEnabled(id)) ? null : skillById(id);
+  }
+
+  router.get("/api/skills", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    json(ctx.response, 200, await skillList());
+    return true;
+  });
+
+  router.post("/api/skills/toggle", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    if (actor.role !== "admin") {
+      await recordAudit({
+        actor: actor.id,
+        action: "skill.toggle",
+        outcome: "denied",
+        detail: "没有管理员权限",
+      });
+      json(ctx.response, 403, { error: "没有管理员权限" });
+      return true;
+    }
+    try {
+      const body = await readJsonBody(ctx.request, { maxBytes: 4 * 1024 });
+      const id = typeof body.id === "string" ? body.id.trim() : "";
+      await skillsStore.setEnabled(id, body.enabled);
+      const name = skillById(id)?.name ?? id;
+      await recordAudit({
+        actor: actor.id,
+        action: "skill.toggle",
+        target: id,
+        outcome: "ok",
+        detail: `${body.enabled ? "启用" : "停用"} ${name}`,
+      });
+      json(ctx.response, 200, await skillList());
+    } catch (error) {
+      const status = error.status || 400;
+      await recordAudit({
+        actor: actor.id,
+        action: "skill.toggle",
+        outcome: status >= 500 ? "error" : "denied",
+        detail: error.message || "技能开关失败",
+      });
+      json(ctx.response, status, { error: error.message || "技能开关失败" });
+    }
+    return true;
+  });
+
   // Automation runs: a pipeline is a frozen step list, a run is its snapshot.
   // Starting, confirming and cancelling are privileged enough to be audited.
   async function automationFailure(ctx, actor, action, target, error) {
@@ -779,8 +849,15 @@ export async function startLocalRuntime(options = {}) {
 
   router.get("/api/automation", async (ctx) => {
     if (!(await requireActor(ctx))) return true;
+    const pipelines = await Promise.all(AUTOMATION_PIPELINES.map(async (definition) => {
+      const skillId = skillForPipeline(definition.id);
+      return {
+        ...describePipeline(definition),
+        ...(skillId ? { skillId, enabled: await skillsStore.isEnabled(skillId) } : {}),
+      };
+    }));
     json(ctx.response, 200, {
-      pipelines: AUTOMATION_PIPELINES.map(describePipeline),
+      pipelines,
       runs: await automation.list(),
     });
     return true;
@@ -791,6 +868,14 @@ export async function startLocalRuntime(options = {}) {
     if (!actor) return true;
     try {
       const body = await readJsonBody(ctx.request, { maxBytes: 16 * 1024 });
+      const requiredSkill = await disabledSkill(skillForPipeline(body.pipelineId));
+      if (requiredSkill) {
+        await automationFailure(ctx, actor, "automation.run", null, {
+          status: 403,
+          message: `技能已停用：${requiredSkill.name}`,
+        });
+        return true;
+      }
       const projectId = typeof body.projectId === "string" ? body.projectId.trim() : "";
       // Runs read project-scoped knowledge, so a typo must fail here instead of
       // producing an empty brief for a project that does not exist.
@@ -1072,9 +1157,11 @@ export async function startLocalRuntime(options = {}) {
     const question = context.at(-1)?.content ?? "";
     // Knowledge is retrieved per turn: only cards that match this question are
     // replayed, and only confirmed ones (a pending proposal is not context yet).
+    // The 知识问答 switch can turn the whole lookup off for this installation.
+    const knowledgeOn = await skillsStore.isEnabled("knowledge-qa");
     const [memory, cards] = await Promise.all([
       memoryStore.get(projectId),
-      knowledgeStore.retrieve(projectId, question),
+      knowledgeOn ? knowledgeStore.retrieve(projectId, question) : [],
     ]);
     const block = [buildMemoryBlock(memory), buildKnowledgeBlock(cards)].filter(Boolean).join("\n\n");
     const messages = [...(block ? [{ role: "system", content: block }] : []), ...context];
@@ -1727,6 +1814,10 @@ export async function startLocalRuntime(options = {}) {
   router.post("/api/handover", async (ctx) => {
     const actor = await requireActor(ctx);
     if (!actor) return true;
+    if (!(await skillsStore.isEnabled("handover"))) {
+      json(ctx.response, 403, { error: "技能已停用：交接包" });
+      return true;
+    }
     let body;
     try {
       body = await readOptionalJsonBody(ctx);
