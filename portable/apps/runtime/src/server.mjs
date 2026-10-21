@@ -20,7 +20,11 @@ import { AUTOMATION_PIPELINES, createAutomationEngine, createAutomationStore, de
 import { createAutomationConfigStore, mergeAutomationParams } from "./automation-config.mjs";
 import { createKnowledgeBriefHandlers } from "./automation-knowledge.mjs";
 import { createRewriteHandler, createScriptDraftHandler, createTopicPackHandler } from "./automation-ai.mjs";
-import { createAudioExtractHandler, createMediaInventoryHandler } from "./automation-media.mjs";
+import {
+  createAudioExtractHandler,
+  createMediaInventoryHandler,
+  createVideoNormalizeHandler,
+} from "./automation-media.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
@@ -349,6 +353,12 @@ export async function startLocalRuntime(options = {}) {
         mediaProbe,
         // Test seam only: production leaves this undefined so media-tools
         // spawns through its own fixed exec runner.
+        runner: options.mediaRun,
+      }),
+      ...createVideoNormalizeHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+        mediaProbe,
         runner: options.mediaRun,
       }),
     },

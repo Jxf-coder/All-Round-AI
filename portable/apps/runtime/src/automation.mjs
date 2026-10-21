@@ -345,6 +345,62 @@ export const AUTOMATION_PIPELINES = Object.freeze([
       },
     ],
   },
+  {
+    id: "video-normalize",
+    name: "视频规格化",
+    desc: "把来源白名单内的视频统一成 H.264 / AAC 的 MP4，可选抽一帧作为封面，供分发与成片使用。",
+    steps: [
+      {
+        id: "normalize",
+        name: "规格化视频",
+        runner: "app",
+        desc: "先用 ffprobe 读取分辨率与时长，再按目标高度缩放并转码，不放大原片。",
+        action: "media.normalize-video",
+        outputs: [
+          { slot: "video", label: "规格化视频" },
+          { slot: "cover", label: "封面图" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "源文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的绝对路径",
+          },
+          {
+            key: "height",
+            label: "目标高度",
+            type: "select",
+            default: "1080",
+            options: [
+              { value: "1080", label: "1080p" },
+              { value: "720", label: "720p" },
+              { value: "540", label: "540p" },
+              { value: "360", label: "360p" },
+            ],
+            hint: "只缩小不放大；宽度按原比例自动取偶数",
+          },
+          {
+            key: "cover",
+            label: "抽取封面",
+            type: "toggle",
+            default: true,
+            hint: "取视频约 1 秒处的一帧，输出 JPEG",
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "预览视频与封面后结束本次运行。",
+        after: ["normalize"],
+        manualHint: "预览画面与封面后点击「我做完了」",
+      },
+    ],
+  },
 ]);
 
 function fail(message) {

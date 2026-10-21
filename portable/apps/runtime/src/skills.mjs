@@ -116,6 +116,17 @@ export const SKILLS = Object.freeze([
     hint: "需要 FFmpeg/ffprobe；没有音频轨的文件会直接失败。",
   },
   {
+    id: "video-normalize",
+    name: "视频规格化",
+    category: "production",
+    icon: "▣",
+    runner: "app",
+    pipelineId: "video-normalize",
+    requiresMedia: "ffmpeg",
+    desc: "把白名单内的视频统一成 H.264 / AAC 的 MP4，按目标高度缩小并抽一帧封面。",
+    hint: "需要 FFmpeg/ffprobe；只缩小不放大，竖屏与横屏都保持原比例。",
+  },
+  {
     id: "media-render",
     name: "影音成片",
     category: "production",

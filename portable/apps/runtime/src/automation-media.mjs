@@ -230,9 +230,154 @@ function durationText(seconds) {
   return `${minutes}:${String(total % 60).padStart(2, "0")}`;
 }
 
-// Audio extraction is the first pipeline that really invokes FFmpeg. It probes
-// the source first, refuses files without an audio track, and removes a partial
-// output when the encoder fails so the run never points at a broken artifact.
+export const VIDEO_HEIGHTS = Object.freeze([1080, 720, 540, 360]);
+
+// Normalising is the step every distribution target needs: one H.264/AAC MP4
+// at a known height, plus an optional poster frame. The source is never
+// upscaled, and a failed encode leaves neither a broken video nor a cover.
+export function createVideoNormalizeHandler({
+  sourceStore,
+  artifactsDir,
+  mediaProbe,
+  runner,
+} = {}) {
+  if (!sourceStore || typeof sourceStore.list !== "function") {
+    throw new TypeError("视频规格化需要来源配置");
+  }
+  if (typeof artifactsDir !== "string" || !path.isAbsolute(artifactsDir)) {
+    throw new TypeError("产物目录必须是绝对路径");
+  }
+  if (typeof mediaProbe !== "function") throw new TypeError("视频规格化需要媒体工具探测");
+
+  return Object.freeze({
+    "media.normalize-video": async ({ run, params }) => {
+      const tools = await mediaProbe();
+      if (!tools?.ffmpeg?.available || !tools?.ffprobe?.available) {
+        throw new Error("未检测到 FFmpeg/ffprobe，请安装后重试（或设置 FFMPEG_PATH/FFPROBE_PATH）");
+      }
+      const requestedHeight = Number(params.height ?? 1080);
+      if (!VIDEO_HEIGHTS.includes(requestedHeight)) throw new Error("目标高度无效");
+      const roots = (await sourceStore.list()).roots;
+      const source = await resolveAllowedFile(params.source, roots);
+
+      let media;
+      try {
+        media = await probeMediaFile({
+          ffprobePath: tools.ffprobe.path,
+          filePath: source,
+          runner,
+        });
+      } catch (error) {
+        throw new Error(`无法读取媒体信息：${error.message}`);
+      }
+      if (!media.video) throw new Error("源文件没有视频轨");
+
+      const directory = path.join(artifactsDir, safeRunName(run.id));
+      await mkdir(directory, { recursive: true });
+      const videoFile = path.join(directory, "video.mp4");
+      const coverFile = path.join(directory, "cover.jpg");
+      const wantedCover = params.cover !== false;
+      await rm(coverFile, { force: true }).catch(() => {});
+
+      // Never upscale: a 480p source stays 480p even when 1080p is requested.
+      const sourceHeight = Number(media.video.height) || 0;
+      const scaled = sourceHeight > 0 ? Math.min(requestedHeight, sourceHeight) : requestedHeight;
+      const evenHeight = scaled % 2 === 0 ? scaled : scaled - 1;
+      const timeoutMs = media.duration
+        ? Math.min(Math.max(Math.ceil(media.duration * 4_000), 120_000), 1_800_000)
+        : 600_000;
+      const encodeArgs = [
+        "-hide_banner", "-nostdin", "-y",
+        "-i", source,
+        "-vf", `scale=-2:${evenHeight}`,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", "160k",
+        videoFile,
+      ];
+
+      try {
+        await runMediaTool({
+          command: tools.ffmpeg.path,
+          args: encodeArgs,
+          timeoutMs,
+          runner,
+        });
+      } catch (error) {
+        await rm(videoFile, { force: true }).catch(() => {});
+        const detail = String(error?.message ?? "未知错误").split(/\r?\n/u)[0].slice(0, 300);
+        throw new Error(`视频规格化失败：${detail}`);
+      }
+
+      let output;
+      try {
+        output = await stat(videoFile);
+      } catch {
+        throw new Error("视频规格化失败：没有生成输出文件");
+      }
+      if (!output.isFile() || output.size === 0) {
+        await rm(videoFile, { force: true }).catch(() => {});
+        throw new Error("视频规格化失败：输出文件为空");
+      }
+
+      const artifacts = [{
+        slot: "video",
+        label: "规格化视频（H.264 / AAC）",
+        path: videoFile,
+        bytes: output.size,
+      }];
+      let coverBytes = 0;
+      if (wantedCover) {
+        const at = media.duration ? Math.min(1, Math.max(0.1, media.duration / 3)) : 0.5;
+        try {
+          await runMediaTool({
+            command: tools.ffmpeg.path,
+            args: [
+              "-hide_banner", "-nostdin", "-y",
+              "-ss", at.toFixed(2),
+              "-i", videoFile,
+              "-frames:v", "1",
+              "-q:v", "2",
+              coverFile,
+            ],
+            timeoutMs: 60_000,
+            runner,
+          });
+          const cover = await stat(coverFile);
+          if (!cover.isFile() || cover.size === 0) throw new Error("封面为空");
+          coverBytes = cover.size;
+          artifacts.push({
+            slot: "cover",
+            label: "封面图（JPEG）",
+            path: coverFile,
+            bytes: cover.size,
+          });
+        } catch (error) {
+          await rm(videoFile, { force: true }).catch(() => {});
+          await rm(coverFile, { force: true }).catch(() => {});
+          const detail = String(error?.message ?? "未知错误").split(/\r?\n/u)[0].slice(0, 300);
+          throw new Error(`封面抽取失败：${detail}`);
+        }
+      }
+
+      const resolution = media.video.width && media.video.height
+        ? `${media.video.width}×${media.video.height}`
+        : "未知分辨率";
+      return {
+        artifacts,
+        logs: [
+          `源文件：${path.basename(source)}；${resolution}，时长 ${durationText(media.duration)}`,
+          `目标高度 ${evenHeight}p，${media.video.codec || "未知编码"} → H.264 / AAC`,
+          `视频 ${formatSize(output.size)}${coverBytes ? `；封面 ${formatSize(coverBytes)}` : "；未抽取封面"}`,
+        ],
+      };
+    },
+  });
+}
+
+// Audio extraction probes the source first, refuses files without an audio
+// track, and removes a partial output when the encoder fails so the run never
+// points at a broken artifact.
 export function createAudioExtractHandler({
   sourceStore,
   artifactsDir,

@@ -6,8 +6,10 @@ import test from "node:test";
 
 import {
   AUDIO_FORMATS,
+  VIDEO_HEIGHTS,
   createAudioExtractHandler,
   createMediaInventoryHandler,
+  createVideoNormalizeHandler,
   mediaKindOf,
   scanMediaDirectory,
 } from "../src/automation-media.mjs";
@@ -336,5 +338,219 @@ test("audio extraction refuses to be built without a probe or artifacts director
       mediaProbe: async () => toolsAvailable(),
     }),
     /产物目录必须是绝对路径/u,
+  );
+});
+
+// --- video normalisation -------------------------------------------------
+
+function normalizeRunner({
+  video = { codec_name: "h264", width: 1920, height: 1080 },
+  duration = "12.5",
+  withAudio = true,
+  failEncode = false,
+  failCover = false,
+  calls = [],
+} = {}) {
+  return async (command, args, options) => {
+    calls.push({ command, args, options });
+    if (args.includes("-print_format")) {
+      return {
+        stdout: JSON.stringify({
+          format: { format_name: "mov,mp4", duration, size: "2048" },
+          streams: [
+            { codec_type: "video", ...video },
+            ...(withAudio ? [{ codec_type: "audio", codec_name: "aac", sample_rate: "48000", channels: 2 }] : []),
+          ],
+        }),
+        stderr: "",
+      };
+    }
+    const output = args[args.length - 1];
+    if (args.includes("-frames:v")) {
+      if (failCover) {
+        await writeFile(output, "");
+        throw new Error("cover extraction failed");
+      }
+      await writeFile(output, Buffer.alloc(512, 3));
+      return { stdout: "", stderr: "" };
+    }
+    if (failEncode) {
+      await writeFile(output, Buffer.alloc(64, 1));
+      throw new Error("encode failed");
+    }
+    await writeFile(output, Buffer.alloc(1024, 2));
+    return { stdout: "", stderr: "" };
+  };
+}
+
+function normalizeHandler({ media, artifacts, runner, mediaProbe = async () => toolsAvailable() }) {
+  return createVideoNormalizeHandler({
+    sourceStore: { list: async () => ({ roots: [media] }) },
+    artifactsDir: artifacts,
+    mediaProbe,
+    runner,
+  });
+}
+
+async function normalizeFixture(callback) {
+  await fixture(async ({ root, media, artifacts }) => {
+    await callback({ root, media, artifacts, source: path.join(media, "a.mp4") });
+  });
+}
+
+test("video normalisation scales to the requested height and writes a cover", async () => {
+  assert.deepEqual(VIDEO_HEIGHTS, [1080, 720, 540, 360]);
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const calls = [];
+    const handler = normalizeHandler({ media, artifacts, runner: normalizeRunner({ calls }) });
+    const outcome = await handler["media.normalize-video"]({
+      run: runLike(),
+      params: { source, height: "720", cover: true },
+    });
+
+    assert.deepEqual(outcome.artifacts.map((entry) => entry.slot), ["video", "cover"]);
+    assert.match(outcome.artifacts[0].path, /run_media[\\/]video\.mp4$/u);
+    assert.match(outcome.artifacts[1].path, /run_media[\\/]cover\.jpg$/u);
+    assert.equal(outcome.artifacts[0].bytes, 1024);
+    assert.equal(outcome.artifacts[1].bytes, 512);
+
+    const encode = calls.find((call) => call.args.includes("-c:v"));
+    assert.deepEqual(encode.args.slice(0, 3), ["-hide_banner", "-nostdin", "-y"]);
+    assert.equal(encode.args[encode.args.indexOf("-vf") + 1], "scale=-2:720");
+    assert.ok(encode.args.includes("libx264"));
+    assert.ok(encode.args.includes("+faststart"));
+    assert.equal(encode.options.timeout, 120_000);
+
+    const cover = calls.find((call) => call.args.includes("-frames:v"));
+    assert.equal(cover.args[cover.args.indexOf("-ss") + 1], "1.00");
+    assert.match(cover.args[cover.args.length - 1], /cover\.jpg$/u);
+
+    assert.equal(outcome.logs[0], "源文件：a.mp4；1920×1080，时长 0:13");
+    assert.equal(outcome.logs[1], "目标高度 720p，h264 → H.264 / AAC");
+    assert.equal(outcome.logs[2], "视频 1.0 KB；封面 512 B");
+    assert.equal((await readFile(path.join(artifacts, "run_media", "video.mp4"))).length, 1024);
+  });
+});
+
+test("video normalisation never upscales a smaller source", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const calls = [];
+    const handler = normalizeHandler({
+      media,
+      artifacts,
+      runner: normalizeRunner({ video: { codec_name: "hevc", width: 854, height: 481 }, calls }),
+    });
+    const outcome = await handler["media.normalize-video"]({
+      run: runLike(),
+      params: { source, height: "1080", cover: false },
+    });
+    const encode = calls.find((call) => call.args.includes("-c:v"));
+    // 481 becomes 480 so the derived width stays even.
+    assert.equal(encode.args[encode.args.indexOf("-vf") + 1], "scale=-2:480");
+    assert.deepEqual(outcome.artifacts.map((entry) => entry.slot), ["video"]);
+    assert.match(outcome.logs[2], /未抽取封面/u);
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "cover.jpg")), /ENOENT/u);
+  });
+});
+
+test("video normalisation refuses sources without a video track or with a bad height", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    // A stream list with only audio claims no video track.
+    const audioOnly = async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { duration: "5" },
+            streams: [{ codec_type: "audio", codec_name: "aac" }],
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error("should not encode");
+    };
+    await assert.rejects(
+      normalizeHandler({ media, artifacts, runner: audioOnly })["media.normalize-video"]({
+        run: runLike(),
+        params: { source, height: "720" },
+      }),
+      /没有视频轨/u,
+    );
+
+    const handler = normalizeHandler({ media, artifacts, runner: normalizeRunner() });
+    await assert.rejects(
+      handler["media.normalize-video"]({
+        run: runLike(),
+        params: { source, height: "900", cover: false },
+      }),
+      /目标高度无效/u,
+    );
+
+    await assert.rejects(
+      normalizeHandler({
+        media,
+        artifacts,
+        runner: normalizeRunner(),
+        mediaProbe: async () => ({
+          ffmpeg: { available: false, reason: "未安装" },
+          ffprobe: { available: true, path: FFPROBE },
+        }),
+      })["media.normalize-video"]({ run: runLike(), params: { source, height: "720" } }),
+      /未检测到 FFmpeg/u,
+    );
+  });
+});
+
+test("a failed encode or cover removes both partial files", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    await assert.rejects(
+      normalizeHandler({ media, artifacts, runner: normalizeRunner({ failEncode: true }) })["media.normalize-video"]({
+        run: runLike(),
+        params: { source, height: "720", cover: true },
+      }),
+      (error) => {
+        assert.match(error.message, /^视频规格化失败：encode failed$/u);
+        return true;
+      },
+    );
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "video.mp4")), /ENOENT/u);
+
+    await assert.rejects(
+      normalizeHandler({ media, artifacts, runner: normalizeRunner({ failCover: true }) })["media.normalize-video"]({
+        run: runLike(),
+        params: { source, height: "720", cover: true },
+      }),
+      (error) => {
+        assert.match(error.message, /^封面抽取失败：cover extraction failed$/u);
+        return true;
+      },
+    );
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "video.mp4")), /ENOENT/u);
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "cover.jpg")), /ENOENT/u);
+  });
+});
+
+test("video normalisation refuses to be built without its dependencies", () => {
+  assert.throws(
+    () => createVideoNormalizeHandler({
+      sourceStore: null,
+      artifactsDir: os.tmpdir(),
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /来源配置/u,
+  );
+  assert.throws(
+    () => createVideoNormalizeHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: "relative",
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /产物目录必须是绝对路径/u,
+  );
+  assert.throws(
+    () => createVideoNormalizeHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: os.tmpdir(),
+    }),
+    /媒体工具探测/u,
   );
 });
