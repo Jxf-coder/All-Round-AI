@@ -76,7 +76,23 @@ export async function pairDevice({
   return { serverUrl: base, device: body.device, token: body.token };
 }
 
-export async function saveAgentConfig({ filePath, serverUrl, device, token }) {
+function normalizeRoots(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("允许访问的目录必须是数组");
+  const roots = value.map((root) => {
+    if (typeof root !== "string" || !path.isAbsolute(root)) {
+      throw new Error("允许访问的目录必须是绝对路径");
+    }
+    const normalized = path.normalize(root);
+    // `path.normalize` keeps a trailing separator, so `/a/b/` and `/a/b`
+    // would otherwise count as two roots for the same directory.
+    const rootOnly = path.parse(normalized).root;
+    return normalized === rootOnly ? normalized : normalized.replace(/[\\/]+$/u, "");
+  });
+  return [...new Set(roots)];
+}
+
+export async function saveAgentConfig({ filePath, serverUrl, device, token, roots = [] }) {
   if (!path.isAbsolute(filePath)) throw new TypeError("配置文件必须是绝对路径");
   if (typeof token !== "string" || token.length < MIN_TOKEN_LENGTH) {
     throw new Error("设备令牌无效");
@@ -88,6 +104,7 @@ export async function saveAgentConfig({ filePath, serverUrl, device, token }) {
     name: device.name,
     platform: device.platform,
     pairedAt: device.pairedAt,
+    roots: normalizeRoots(roots),
     token,
   });
   return { filePath, deviceId: device.id, name: device.name };
@@ -110,6 +127,12 @@ export async function loadAgentConfig(filePath) {
   if (typeof parsed.deviceId !== "string" || typeof parsed.name !== "string") {
     throw new Error("设备配置缺少设备信息，请重新配对");
   }
+  let roots;
+  try {
+    roots = normalizeRoots(parsed.roots);
+  } catch {
+    throw new Error("设备配置里的允许目录无效，请重新配对");
+  }
   return {
     schema: 1,
     serverUrl: normalizeServerUrl(parsed.serverUrl),
@@ -117,6 +140,7 @@ export async function loadAgentConfig(filePath) {
     name: parsed.name,
     platform: typeof parsed.platform === "string" ? parsed.platform : null,
     pairedAt: typeof parsed.pairedAt === "string" ? parsed.pairedAt : null,
+    roots,
     token: parsed.token,
   };
 }

@@ -129,6 +129,14 @@ function publicView(device, { now, freshMs }) {
   };
 }
 
+function findByHash(document, hash) {
+  const presented = Buffer.from(hash, "hex");
+  return document.devices.find((entry) => {
+    const stored = Buffer.from(entry.tokenHash, "hex");
+    return stored.length === presented.length && timingSafeEqual(stored, presented);
+  }) ?? null;
+}
+
 export async function createDeviceRegistry({
   filePath,
   now = () => new Date(),
@@ -212,17 +220,22 @@ export async function createDeviceRegistry({
       : text(version, "版本", MAX_VERSION_LENGTH, { required: false });
     const normalizedCapabilities = list === undefined ? undefined : capabilities(list);
     return store.update((document) => {
-      const device = document.devices.find((entry) => {
-        const stored = Buffer.from(entry.tokenHash, "hex");
-        const presented = Buffer.from(hash, "hex");
-        return stored.length === presented.length && timingSafeEqual(stored, presented);
-      });
+      const device = findByHash(document, hash);
       if (!device) throw new DeviceError(401, "设备凭据无效");
       device.lastSeenAt = isoTimestamp(now);
       if (normalizedVersion !== undefined) device.version = normalizedVersion;
       if (normalizedCapabilities !== undefined) device.capabilities = normalizedCapabilities;
       return publicView(device, { now, freshMs: heartbeatFreshMs });
     });
+  }
+
+  // Read-only token lookup for channels that must not refresh lastSeenAt.
+  async function authenticate({ token }) {
+    const candidate = text(token, "设备凭据", 200);
+    const document = await store.read();
+    const device = findByHash(document, hashDeviceToken(candidate));
+    if (!device) throw new DeviceError(401, "设备凭据无效");
+    return publicView(device, { now, freshMs: heartbeatFreshMs });
   }
 
   async function list() {
@@ -244,7 +257,7 @@ export async function createDeviceRegistry({
     });
   }
 
-  return Object.freeze({ issueTicket, pair, heartbeat, list, revoke });
+  return Object.freeze({ issueTicket, pair, heartbeat, authenticate, list, revoke });
 }
 
 export function readDeviceToken(request) {

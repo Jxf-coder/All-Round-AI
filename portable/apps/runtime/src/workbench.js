@@ -1089,6 +1089,9 @@ let knowledgeState = null;
 // revocation are admin actions and surface the server's 403 in the panel.
 let deviceState = null;
 let deviceTicket = null;
+// One inline probe at a time: which device the operator opened, the absolute
+// path they typed, and the last command outcome.
+let deviceProbe = null;
 let handoverState = null;
 let intakeEditing = false;
 let intakeNotice = "";
@@ -1514,8 +1517,106 @@ function deviceCard(device) {
     }
   });
   actions.append(remove);
+  const browse = actionButton("本机文件", () => {
+    deviceProbe = deviceProbe?.deviceId === device.id
+      ? null
+      : { deviceId: device.id, path: "", busy: false, result: null, error: null };
+    renderDeviceBody();
+  });
+  if (!device.online) {
+    browse.disabled = true;
+    browse.title = "设备离线时无法执行命令";
+  }
+  actions.append(browse);
   card.append(actions);
+  if (deviceProbe?.deviceId === device.id) card.append(deviceProbeBlock(device));
   return card;
+}
+
+async function runDeviceCommand(device, type) {
+  if (!deviceProbe) return;
+  const target = deviceProbe.path.trim();
+  if (!target) {
+    deviceProbe = { ...deviceProbe, error: "请先填写设备上的绝对路径。", result: null };
+    renderDeviceBody();
+    return;
+  }
+  deviceProbe = { ...deviceProbe, busy: true, error: null, result: null };
+  renderDeviceBody();
+  try {
+    const response = await apiRequest(
+      `/api/devices/${encodeURIComponent(device.id)}/commands`,
+      { method: "POST", body: JSON.stringify({ type, path: target }) },
+    );
+    const body = await response?.json().catch(() => null);
+    deviceProbe = response?.ok
+      ? { ...deviceProbe, busy: false, result: { type, value: body?.result ?? null } }
+      : { ...deviceProbe, busy: false, error: body?.error || "设备没有响应。" };
+  } catch {
+    deviceProbe = { ...deviceProbe, busy: false, error: "连不上运行时，稍后再试。" };
+  }
+  renderDeviceBody();
+}
+
+function deviceProbeBlock(device) {
+  const block = element("div", "device-probe");
+  const input = element("input", "device-probe-input");
+  input.type = "text";
+  input.placeholder = "设备上的绝对路径，例如 /Users/me/project 或 D:\\project";
+  input.value = deviceProbe.path;
+  input.addEventListener("input", () => {
+    deviceProbe = { ...deviceProbe, path: input.value };
+  });
+  block.append(input);
+
+  const actions = element("div", "device-actions");
+  const list = actionButton("列出目录", () => void runDeviceCommand(device, "files.list"));
+  const read = actionButton("读取文件", () => void runDeviceCommand(device, "files.read"));
+  if (deviceProbe.busy) {
+    list.disabled = true;
+    read.disabled = true;
+  }
+  actions.append(list, read);
+  block.append(actions);
+
+  block.append(element(
+    "p",
+    "panel-note",
+    "只读取配对时 --root 指定的目录；越界路径、二进制与超过 256 KB 的文件会被设备拒绝。",
+  ));
+  if (deviceProbe.busy) block.append(element("p", "panel-note", "已发给设备，等待响应（最多 20 秒）…"));
+  if (deviceProbe.error) block.append(element("p", "device-error", deviceProbe.error));
+
+  const result = deviceProbe.result;
+  if (result?.type === "files.list") {
+    const items = Array.isArray(result.value?.entries) ? result.value.entries : [];
+    block.append(element(
+      "p",
+      "device-meta",
+      `${result.value?.path || ""}${result.value?.truncated ? "（条目过多，已截断）" : ""}`,
+    ));
+    const listNode = element("ul", "device-files");
+    if (!items.length) listNode.append(element("li", null, "空目录"));
+    for (const entry of items) {
+      const item = element(
+        "li",
+        entry.type === "directory" ? "directory" : null,
+        `${entry.type === "directory" ? "▸" : "·"} ${entry.name}`,
+      );
+      listNode.append(item);
+    }
+    block.append(listNode);
+  } else if (result?.type === "files.read") {
+    block.append(element(
+      "p",
+      "device-meta",
+      `${result.value?.path || ""} · ${result.value?.size ?? 0} 字节`,
+    ));
+    const pre = element("pre", "device-file-text");
+    pre.textContent = result.value?.text ?? "";
+    block.append(pre);
+  }
+  return block;
 }
 
 function renderDeviceBody() {
@@ -1544,7 +1645,7 @@ function renderDeviceBody() {
   pairBlock.append(element(
     "p",
     "panel-note",
-    "在 desk 设备上执行 npm run desk -- pair --server <本地址> --ticket <票据> --name <设备名>。票据十分钟内有效，且只能使用一次。",
+    "在 desk 设备上执行 npm run desk -- pair --server <本地址> --ticket <票据> --name <设备名> --root <允许目录>，再用 npm run desk -- run 常驻。票据十分钟内有效，且只能使用一次。",
   ));
   if (deviceTicket?.ticket) {
     const box = element("div", "device-ticket");

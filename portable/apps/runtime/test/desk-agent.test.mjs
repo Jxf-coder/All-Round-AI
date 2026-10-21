@@ -165,6 +165,56 @@ test("a missing, damaged or incomplete config fails closed", async () => {
   }
 });
 
+test("the config records allowed roots and refuses relative or malformed ones", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "allround-desk-roots-"));
+  try {
+    const configPath = path.join(root, "desk-agent.json");
+    const allowed = path.join(root, "project");
+    await saveAgentConfig({
+      filePath: configPath,
+      serverUrl: "http://127.0.0.1:3141",
+      device: { id: "dev-0123456789ab", name: "办公室 PC", platform: "win32", pairedAt: "2026-10-20T08:00:00.000Z" },
+      token: TOKEN,
+      roots: [allowed, `${allowed}${path.sep}`, allowed],
+    });
+    const loaded = await loadAgentConfig(configPath);
+    assert.deepEqual(loaded.roots, [allowed]);
+
+    await assert.rejects(
+      saveAgentConfig({
+        filePath: configPath,
+        serverUrl: "http://127.0.0.1:3141",
+        device: { id: "dev-0123456789ab", name: "办公室 PC", platform: "win32", pairedAt: "2026-10-20T08:00:00.000Z" },
+        token: TOKEN,
+        roots: ["relative/path"],
+      }),
+      /必须是绝对路径/u,
+    );
+
+    await writeFile(configPath, JSON.stringify({
+      schema: 1,
+      serverUrl: "http://127.0.0.1:3141",
+      deviceId: "dev-0123456789ab",
+      name: "x",
+      token: TOKEN,
+      roots: "not-an-array",
+    }));
+    await assert.rejects(loadAgentConfig(configPath), /允许目录无效/u);
+
+    await writeFile(configPath, JSON.stringify({
+      schema: 1,
+      serverUrl: "http://127.0.0.1:3141",
+      deviceId: "dev-0123456789ab",
+      name: "x",
+      token: TOKEN,
+      roots: ["relative/path"],
+    }));
+    await assert.rejects(loadAgentConfig(configPath), /允许目录无效/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the heartbeat loop backs off on failures and stops when aborted", async () => {
   const config = { serverUrl: "http://127.0.0.1:3141", token: TOKEN };
   let attempts = 0;

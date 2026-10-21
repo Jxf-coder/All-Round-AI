@@ -13,6 +13,7 @@ import { createLocalAuth } from "./auth.mjs";
 import { createConfigStore } from "./config-store.mjs";
 import { createConversationStore } from "./conversations.mjs";
 import { createDeviceRegistry, readDeviceToken } from "./devices.mjs";
+import { createDeviceChannel } from "./device-channel.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
@@ -253,6 +254,9 @@ export async function startLocalRuntime(options = {}) {
   // their own token. Only token hashes are persisted.
   const deviceRegistry = options.deviceRegistry
     ?? await createDeviceRegistry({ filePath: path.join(directories.config, "devices.json") });
+  // Commands travel over the agent's outbound long-poll, so the runtime never
+  // needs an inbound port on the desk.
+  const deviceChannel = options.deviceChannel ?? createDeviceChannel();
 
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
@@ -447,6 +451,93 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, 200, { device });
     } catch (error) {
       json(ctx.response, error.status || 400, { error: error.message || "心跳失败" });
+    }
+    return true;
+  });
+
+  // The agent long-polls for one command at a time and posts the result back.
+  router.get("/api/devices/commands", async (ctx) => {
+    const token = readDeviceToken(ctx.request);
+    if (!token) {
+      json(ctx.response, 401, { error: "缺少设备凭据" });
+      return true;
+    }
+    try {
+      const device = await deviceRegistry.authenticate({ token });
+      const requested = Number(ctx.url.searchParams.get("wait") ?? "10000");
+      const waitMs = Number.isFinite(requested)
+        ? Math.min(Math.max(requested, 1_000), 30_000)
+        : 10_000;
+      const command = await deviceChannel.take({ deviceId: device.id, waitMs });
+      json(ctx.response, 200, {
+        command: command
+          ? { id: command.id, type: command.type, payload: command.payload }
+          : null,
+      });
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "读取命令失败" });
+    }
+    return true;
+  });
+
+  router.post("/api/devices/commands/:id/result", async (ctx) => {
+    const token = readDeviceToken(ctx.request);
+    if (!token) {
+      json(ctx.response, 401, { error: "缺少设备凭据" });
+      return true;
+    }
+    try {
+      const device = await deviceRegistry.authenticate({ token });
+      const body = await readJsonBody(ctx.request, { maxBytes: 1024 * 1024 });
+      const accepted = deviceChannel.complete({
+        deviceId: device.id,
+        commandId: ctx.params.id,
+        ok: body.ok === true,
+        result: body.result,
+        error: body.error,
+      });
+      json(ctx.response, 202, { accepted });
+    } catch (error) {
+      json(ctx.response, error.status || 400, { error: error.message || "回传结果失败" });
+    }
+    return true;
+  });
+
+  // Requiring a device id keeps typos from waiting out the command timeout.
+  router.post("/api/devices/:id/commands", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    if (actor.role !== "admin") {
+      json(ctx.response, 403, { error: "没有管理员权限" });
+      return true;
+    }
+    try {
+      const devices = await deviceRegistry.list();
+      if (!devices.some((device) => device.id === ctx.params.id)) {
+        json(ctx.response, 404, { error: "设备不存在" });
+        return true;
+      }
+      const body = await readJsonBody(ctx.request, { maxBytes: 8 * 1024 });
+      if (!["files.list", "files.read"].includes(body.type)) {
+        json(ctx.response, 400, { error: "不支持的命令类型" });
+        return true;
+      }
+      const target = body.path;
+      if (typeof target !== "string" || target.trim() === "" || target.length > 4096
+        || /[\r\n\0]/u.test(target)) {
+        json(ctx.response, 400, { error: "路径无效" });
+        return true;
+      }
+      const { wait } = deviceChannel.enqueue({
+        deviceId: ctx.params.id,
+        type: body.type,
+        payload: { path: target },
+      });
+      const result = await wait;
+      json(ctx.response, 200, { ok: true, result });
+    } catch (error) {
+      const status = error.code === "TIMEOUT" ? 504 : error.code === "BUSY" ? 429 : error.status || 400;
+      json(ctx.response, status, { error: error.message || "命令失败" });
     }
     return true;
   });

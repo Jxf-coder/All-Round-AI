@@ -12,10 +12,11 @@ import {
   sendHeartbeat,
 } from "./desk-agent.mjs";
 import { listDirectory, readTextFile } from "./local-files.mjs";
+import { runCommandLoop } from "./desk-channel.mjs";
 import { writeDeskService } from "./desk-service.mjs";
 
 const USAGE = `用法：
-  node desk-cli.mjs pair      --server <实例地址> --ticket <配对票据> --name <设备名称> [--version <版本>] [--platform <平台>] [--capabilities a,b] [--config <文件>]
+  node desk-cli.mjs pair      --server <实例地址> --ticket <配对票据> --name <设备名称> [--root <允许目录> ...] [--version <版本>] [--platform <平台>] [--capabilities a,b] [--config <文件>]
   node desk-cli.mjs heartbeat [--config <文件>] [--version <版本>]
   node desk-cli.mjs run       [--config <文件>] [--interval <秒>] [--max-backoff <秒>]
   node desk-cli.mjs service   --out <输出目录> [--config <文件>]
@@ -23,12 +24,13 @@ const USAGE = `用法：
   node desk-cli.mjs status    [--config <文件>]
 
 票据由管理员在工作台签发，十分钟内有效且只能使用一次。pair 会把设备令牌写入
-配置文件（默认位于本机数据目录的 desk-agent.json，权限 0600），之后 heartbeat
-用该令牌上报在线状态。run 常驻上报，网络失败按指数退避（默认 30 秒起、最长
-300 秒），令牌失效则立即停止。service 只生成当前平台的用户级服务文件（Linux
-systemd user、macOS LaunchAgent、Windows 登录计划任务），安装仍需手动执行。
-files 只访问 --root 指定目录内的路径：先解析符号链接再校验边界，拒绝越界、
-二进制与超过 256 KB 的文件。status 只显示配对摘要，不会输出令牌。`;
+配置文件（默认位于本机数据目录的 desk-agent.json，权限 0600），--root 记录允许
+工作台访问的绝对目录。run 常驻上报心跳并长轮询执行命令（files.list / files.read），
+网络失败按指数退避（默认 30 秒起、最长 300 秒），令牌失效则立即停止。service 只
+生成当前平台的用户级服务文件（Linux systemd user、macOS LaunchAgent、Windows 登录
+计划任务），安装仍需手动执行。files 只访问 --root 指定目录内的路径：先解析符号
+链接再校验边界，拒绝越界、二进制与超过 256 KB 的文件。status 只显示配对摘要，
+不会输出令牌。`;
 
 function print(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -89,12 +91,14 @@ try {
       serverUrl: paired.serverUrl,
       device: paired.device,
       token: paired.token,
+      roots: values.root ?? [],
     });
     print({
       ok: true,
       config: configPath,
       serverUrl: paired.serverUrl,
       device: paired.device,
+      roots: values.root ?? [],
     });
   } else if (command === "heartbeat") {
     const config = await loadAgentConfig(configPath);
@@ -111,21 +115,55 @@ try {
     const stop = () => controller.abort();
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
-    printEvent({ ok: true, event: "started", name: config.name, intervalSeconds });
-    const summary = await runHeartbeatLoop({
-      config,
-      intervalMs: Math.round(intervalSeconds * 1000),
-      maxBackoffMs: Math.round(maxBackoffSeconds * 1000),
-      signal: controller.signal,
-      onBeat: (device) => printEvent({
-        ok: true,
-        event: "beat",
-        status: device.status,
-        lastSeenAt: device.lastSeenAt,
-      }),
-      onError: (error) => printEvent({ ok: false, event: "retry", error: error.message }),
+    printEvent({
+      ok: true,
+      event: "started",
+      name: config.name,
+      intervalSeconds,
+      roots: config.roots,
     });
-    printEvent({ ok: true, event: "stopped", ...summary });
+    // Heartbeat and command polling share one abort signal: a revoked token
+    // has to take both loops down, not leave half the agent retrying.
+    const haltOnUnauthorized = (error) => {
+      if (error?.code === "DEVICE_UNAUTHORIZED") controller.abort();
+      throw error;
+    };
+    const settled = await Promise.allSettled([
+      runHeartbeatLoop({
+        config,
+        intervalMs: Math.round(intervalSeconds * 1000),
+        maxBackoffMs: Math.round(maxBackoffSeconds * 1000),
+        signal: controller.signal,
+        onBeat: (device) => printEvent({
+          ok: true,
+          event: "beat",
+          status: device.status,
+          lastSeenAt: device.lastSeenAt,
+        }),
+        onError: (error) => printEvent({ ok: false, event: "retry", error: error.message }),
+      }).catch(haltOnUnauthorized),
+      runCommandLoop({
+        config,
+        signal: controller.signal,
+        onCommand: (outcome) => printEvent({
+          ok: outcome.ok,
+          event: "command",
+          type: outcome.command.type,
+          path: outcome.command.payload?.path,
+          ...(outcome.ok ? {} : { error: outcome.error }),
+        }),
+        onError: (error) => printEvent({ ok: false, event: "command-retry", error: error.message }),
+      }).catch(haltOnUnauthorized),
+    ]);
+    const failure = settled.find((entry) => entry.status === "rejected");
+    if (failure) throw failure.reason;
+    printEvent({
+      ok: true,
+      event: "stopped",
+      beats: settled[0].value.beats,
+      failures: settled[0].value.failures,
+      commands: settled[1].value.handled,
+    });
   } else if (command === "service") {
     if (!values.out) throw new Error("service 需要 --out");
     await loadAgentConfig(configPath);
@@ -163,6 +201,7 @@ try {
       name: config.name,
       platform: config.platform,
       pairedAt: config.pairedAt,
+      roots: config.roots,
     });
   } else {
     process.stderr.write(`${USAGE}\n`);
