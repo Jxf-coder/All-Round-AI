@@ -348,3 +348,7 @@ html.dark .skill-switch{background:#ffffff14;color:#d0def8a8;border-color:rgba(2
 html.dark .skill-switch.on{background:#123a2b;border-color:#1d5c45;color:#5fe0aa}
 html.dark .skill-ready.off{color:#f3c07a}
 @media(max-width:900px){.skill-grid{grid-template-columns:1fr}.skill-stats{grid-template-columns:repeat(2,1fr)}}
+/* The prototype note used to sit at the top of the workbench and covered panel
+   cards; keep it as a small unobtrusive footer instead. */
+.local-notice{position:absolute;right:18px;bottom:6px;top:auto;max-width:calc(100% - 36px);padding:2px 6px;border-radius:6px;background:#ffffffb8;color:#9ca7b5;font-size:9px;line-height:1.4;text-align:right;pointer-events:none}
+html.dark .local-notice{background:#0b1422cc;color:#d0def87a}

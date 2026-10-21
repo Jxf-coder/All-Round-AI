@@ -2132,11 +2132,15 @@ async function refreshAutomation() {
     const response = await apiRequest(`/api/automation${query}`);
     const body = await response?.json().catch(() => null);
     automationState = response?.ok
-      ? { pipelines: body?.pipelines ?? [], runs: body?.runs ?? [] }
-      : { pipelines: [], runs: [], error: body?.error || "读取自动化列表失败。" };
+      ? {
+        pipelines: body?.pipelines ?? [],
+        runs: body?.runs ?? [],
+        media: body?.media ?? null,
+      }
+      : { pipelines: [], runs: [], media: null, error: body?.error || "读取自动化列表失败。" };
     if (response?.ok) seedAutomationDraft(body?.configs);
   } catch {
-    automationState = { pipelines: [], runs: [], error: "连不上运行时，稍后再试。" };
+    automationState = { pipelines: [], runs: [], media: null, error: "连不上运行时，稍后再试。" };
   }
   renderAutomationBody();
 }
@@ -2171,6 +2175,9 @@ async function openAutomationArtifact(runId, slot) {
     automationError = "连不上运行时，稍后再试。";
   }
   renderAutomationBody();
+  // The artifact block is appended below the run list; bring it into view so
+  // "查看素材清单" does not look like it did nothing on a short viewport.
+  if (automationArtifact) panelView.scrollTop = panelView.scrollHeight;
 }
 
 function automationBadge(status, labels) {
@@ -2274,6 +2281,10 @@ function renderAutomationBody() {
     head.append(start);
     card.append(head);
     if (pipeline.desc) card.append(element("p", "panel-note", pipeline.desc));
+    if (pipeline.id === "media-inventory" && state.media?.ffmpeg?.available === false) {
+      card.append(element("p", "panel-note",
+        `未检测到 FFmpeg（${state.media.ffmpeg.reason}）：素材清单可用，转码与成片要等安装后再开放。`));
+    }
     if (pipeline.enabled === false) {
       card.append(element("p", "device-error", "对应技能已停用，去 Skill 面板重新启用后才能开跑。"));
     }

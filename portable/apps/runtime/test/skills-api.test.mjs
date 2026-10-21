@@ -107,9 +107,9 @@ test("the catalog is readable by any session and reports missing desk capability
     });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(body.skills.length, 13);
-    assert.equal(body.stats.enabled, 9);
-    assert.equal(body.stats.available, 6);
+    assert.equal(body.skills.length, 14);
+    assert.equal(body.stats.enabled, 10);
+    assert.equal(body.stats.available, 7);
     assert.equal(body.stats.comingSoon, 4);
 
     const files = body.skills.find((skill) => skill.id === "local-files");
@@ -127,7 +127,7 @@ test("the catalog is readable by any session and reports missing desk capability
     const readyFiles = refreshed.skills.find((skill) => skill.id === "local-files");
     assert.equal(readyFiles.available, true);
     assert.equal(readyFiles.devices, 1);
-    assert.equal(refreshed.stats.available, 8);
+    assert.equal(refreshed.stats.available, 9);
   } finally {
     await app.close();
   }
@@ -154,7 +154,7 @@ test("only an administrator can flip a switch and every attempt is audited", asy
     assert.equal(off.status, 200);
     const listed = await off.json();
     assert.equal(listed.skills.find((skill) => skill.id === "local-screen").enabled, false);
-    assert.equal(listed.stats.enabled, 8);
+    assert.equal(listed.stats.enabled, 9);
 
     const audit = await (await fetch(`${app.runtime.url}/api/audit?limit=100`, {
       headers: { cookie: app.admin.cookie },

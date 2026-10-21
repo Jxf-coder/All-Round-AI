@@ -247,6 +247,60 @@ export const AUTOMATION_PIPELINES = Object.freeze([
       },
     ],
   },
+  {
+    id: "media-inventory",
+    name: "媒体素材清单",
+    desc: "扫描来源白名单里的一个目录，列出视频 / 音频 / 图片与大小，供后续影音产线选材；不调用 FFmpeg。",
+    steps: [
+      {
+        id: "scan",
+        name: "扫描素材",
+        runner: "app",
+        desc: "只读取「来源配置」已允许的目录，按类型收集文件并写成 Markdown 清单。",
+        action: "media.inventory",
+        outputs: [{ slot: "inventory", label: "素材清单" }],
+        params: [
+          {
+            key: "root",
+            label: "素材目录",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的绝对路径",
+          },
+          {
+            key: "kinds",
+            label: "素材类型",
+            type: "select",
+            default: "all",
+            options: [
+              { value: "all", label: "全部媒体" },
+              { value: "video", label: "只要视频" },
+              { value: "audio", label: "只要音频" },
+              { value: "image", label: "只要图片" },
+            ],
+          },
+          {
+            key: "maxFiles",
+            label: "最多保留",
+            type: "number",
+            default: 50,
+            min: 1,
+            max: 200,
+            hint: "按目录顺序收集，达到上限后标记截断",
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "挑出要进入制作的文件后结束本次运行。",
+        after: ["scan"],
+        manualHint: "核对清单后点击「我做完了」",
+      },
+    ],
+  },
 ]);
 
 function fail(message) {

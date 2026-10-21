@@ -19,6 +19,8 @@ import { AUTOMATION_PIPELINES, createAutomationEngine, createAutomationStore, de
 import { createAutomationConfigStore, mergeAutomationParams } from "./automation-config.mjs";
 import { createKnowledgeBriefHandlers } from "./automation-knowledge.mjs";
 import { createRewriteHandler, createScriptDraftHandler, createTopicPackHandler } from "./automation-ai.mjs";
+import { createMediaInventoryHandler } from "./automation-media.mjs";
+import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
@@ -295,6 +297,9 @@ export async function startLocalRuntime(options = {}) {
   const automationConfigStore = options.automationConfigStore
     ?? await createAutomationConfigStore(path.join(directories.config, "automation-config.json"));
   const automationArtifacts = path.join(directories.data, "artifacts");
+  // FFmpeg is external: probing only reports whether it is usable, so a missing
+  // install disables rendering while the inventory pipeline keeps working.
+  const mediaProbe = options.mediaProbe ?? createMediaToolProbe();
   // AI-backed steps use whichever engine the installation already selected, so
   // a local Ollama install works without a second model configuration.
   const automationChat = options.automationChat ?? (async ({ messages }) => {
@@ -321,6 +326,10 @@ export async function startLocalRuntime(options = {}) {
       ...createRewriteHandler({
         chat: automationChat,
         knowledgeStore,
+        artifactsDir: automationArtifacts,
+      }),
+      ...createMediaInventoryHandler({
+        sourceStore,
         artifactsDir: automationArtifacts,
       }),
     },
@@ -789,6 +798,15 @@ export async function startLocalRuntime(options = {}) {
     return true;
   });
 
+  // External media tools are reported, never required. A manual refresh skips
+  // the short cache after the operator installs FFmpeg.
+  router.get("/api/media/capabilities", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const refresh = ctx.url.searchParams.get("refresh") === "1";
+    json(ctx.response, 200, await mediaProbe({ refresh }));
+    return true;
+  });
+
   // Skill catalog. Availability reflects what the installation can actually do:
   // app skills are ready, desk skills need a paired agent that advertised the
   // capability, and later-phase entries say they are not switchable yet.
@@ -888,6 +906,7 @@ export async function startLocalRuntime(options = {}) {
       pipelines,
       runs: await automation.list(),
       configs,
+      media: await mediaProbe(),
     });
     return true;
   });

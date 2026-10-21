@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -44,6 +44,7 @@ async function boot(options = {}) {
   return {
     runtime,
     projectId: projects.defaultProjectId,
+    root: temporaryRoot,
     admin: {
       "content-type": "application/json",
       origin: runtime.url,
@@ -69,9 +70,9 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 4);
+    assert.equal(body.pipelines.length, 5);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
-      ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite"]);
+      ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -364,6 +365,82 @@ test("the topic and rewrite pipelines produce their own artifacts", async () => 
     assert.match(rewriteArtifact.text, /- 原稿字数：6/u);
     assert.match(rewriteArtifact.text, /镜头 1：旧稿第一段。/u);
     assert.match(rewriteArtifact.text, /需人工核对：无/u);
+  } finally {
+    await app.close();
+  }
+});
+
+test("media tools are reported and the inventory pipeline scans an allowed root", async () => {
+  const app = await boot({
+    mediaProbe: async () => ({
+      ffmpeg: { available: false, path: null, version: null, reason: "未安装，或不在 PATH 里" },
+      ffprobe: { available: false, path: null, version: null, reason: "未安装，或不在 PATH 里" },
+      checkedAt: "2026-10-21T00:00:00.000Z",
+    }),
+  });
+  try {
+    assert.equal((await fetch(`${app.runtime.url}/api/media/capabilities`)).status, 401);
+    const capabilities = await fetch(`${app.runtime.url}/api/media/capabilities`, {
+      headers: { cookie: app.member.cookie },
+    });
+    assert.equal(capabilities.status, 200);
+    assert.equal((await capabilities.json()).ffmpeg.available, false);
+
+    const listed = await (await fetch(`${app.runtime.url}/api/automation`, {
+      headers: { cookie: app.member.cookie },
+    })).json();
+    assert.equal(listed.pipelines.find((pipeline) => pipeline.id === "media-inventory").maxRunning, 2);
+    assert.equal(listed.media.ffmpeg.available, false);
+
+    const mediaDir = path.join(app.root, "media");
+    await mkdir(path.join(mediaDir, "sub"), { recursive: true });
+    await writeFile(path.join(mediaDir, "clip.mp4"), Buffer.alloc(64, 1));
+    await writeFile(path.join(mediaDir, "voice.mp3"), Buffer.alloc(32, 2));
+    await writeFile(path.join(mediaDir, "cover.png"), Buffer.alloc(16, 3));
+    await writeFile(path.join(mediaDir, "notes.txt"), "skip me");
+
+    const saved = await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+    assert.equal(saved.status, 200);
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "media-inventory",
+        projectId: app.projectId,
+        params: { scan: { root: mediaDir, kinds: "video", maxFiles: 10 } },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { run } = await response.json();
+    assert.equal(run.status, "waiting_manual");
+    assert.equal(run.steps.scan.artifacts[0].slot, "inventory");
+    const artifact = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/inventory`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(artifact.text, /^# 媒体素材清单/u);
+    assert.match(artifact.text, /clip\.mp4/u);
+    assert.equal(artifact.text.includes("voice.mp3"), false);
+    assert.equal(artifact.text.includes("notes.txt"), false);
+
+    const outside = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "media-inventory",
+        projectId: app.projectId,
+        params: { scan: { root: app.root, kinds: "all", maxFiles: 10 } },
+      }),
+    });
+    assert.equal(outside.status, 201);
+    const failed = (await outside.json()).run;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /白名单/u);
   } finally {
     await app.close();
   }

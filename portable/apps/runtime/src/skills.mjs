@@ -95,6 +95,16 @@ export const SKILLS = Object.freeze([
     hint: "随阶段 4C 的文本产线一起开放。",
   },
   {
+    id: "media-inventory",
+    name: "素材清单",
+    category: "production",
+    icon: "▤",
+    runner: "app",
+    pipelineId: "media-inventory",
+    desc: "扫描来源白名单里的目录，列出视频、音频、图片与大小，供后续影音产线选材。",
+    hint: "不调用 FFmpeg，未安装也能用；只读取「来源配置」允许的目录。",
+  },
+  {
     id: "media-render",
     name: "影音成片",
     category: "production",
