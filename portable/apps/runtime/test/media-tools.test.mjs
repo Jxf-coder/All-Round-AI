@@ -6,8 +6,12 @@ import { createMediaToolProbe, detectMediaTools, MEDIA_PROBE_TTL_MS } from "../s
 function runnerStub(seen) {
   return async (command, args, options) => {
     seen.push({ command, args, options });
-    if (command === "ffmpeg") return { stdout: "ffmpeg version 6.1.1 Copyright (c) 2000-2023\nbuilt with gcc\n" };
-    if (command === "ffprobe") return { stdout: "ffprobe version 6.1.1\n" };
+    if (command === "ffmpeg" || command.endsWith("ffmpeg.exe")) {
+      return { stdout: "ffmpeg version 6.1.1 Copyright (c) 2000-2023\nbuilt with gcc\n" };
+    }
+    if (command === "ffprobe" || command.endsWith("ffprobe.exe")) {
+      return { stdout: "ffprobe version 6.1.1\n" };
+    }
     throw Object.assign(new Error("missing"), { code: "ENOENT" });
   };
 }
@@ -26,6 +30,31 @@ test("both binaries are probed with a fixed command, no shell and a minimal envi
     assert.equal(Object.keys(call.options.env).includes("PATH"), true);
     assert.equal(Object.keys(call.options.env).includes("HOME"), false);
   }
+});
+
+test("FFMPEG_PATH and FFPROBE_PATH can point outside PATH", async () => {
+  const seen = [];
+  const result = await detectMediaTools({
+    runner: runnerStub(seen),
+    env: {
+      FFMPEG_PATH: "E:\\FFmpeg\\bin\\ffmpeg.exe",
+      FFPROBE_PATH: " E:\\FFmpeg\\bin\\ffprobe.exe ",
+      PATH: "C:\\Windows",
+    },
+  });
+  assert.deepEqual(seen.map((call) => call.command), [
+    "E:\\FFmpeg\\bin\\ffmpeg.exe",
+    "E:\\FFmpeg\\bin\\ffprobe.exe",
+  ]);
+  assert.equal(result.ffmpeg.path, "E:\\FFmpeg\\bin\\ffmpeg.exe");
+  assert.equal(result.ffprobe.path, "E:\\FFmpeg\\bin\\ffprobe.exe");
+
+  const fallback = [];
+  await detectMediaTools({
+    runner: runnerStub(fallback),
+    env: { FFMPEG_PATH: "   ", FFPROBE_PATH: "" },
+  });
+  assert.deepEqual(fallback.map((call) => call.command), ["ffmpeg", "ffprobe"]);
 });
 
 test("a missing binary is reported with a readable reason instead of throwing", async () => {
