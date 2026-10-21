@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -75,6 +75,18 @@ test("file commands stay inside the configured roots", async () => {
     });
     assert.equal(read.text, "hello desk\n");
     assert.equal(read.size, 11);
+
+    const written = await executeCommand({
+      config,
+      command: { type: "files.write", payload: { path: path.join(root, "out.txt"), content: "written\n" } },
+    });
+    assert.equal(written.size, 8);
+    assert.equal((await readFile(path.join(root, "out.txt"), "utf8")), "written\n");
+
+    await assert.rejects(
+      executeCommand({ config, command: { type: "files.write", payload: { path: path.join(root, "no.txt") } } }),
+      /缺少写入内容/u,
+    );
 
     await assert.rejects(
       executeCommand({ config, command: { type: "files.read", payload: { path: path.join(root, "..", "x") } } }),

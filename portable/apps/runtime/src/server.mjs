@@ -572,8 +572,8 @@ export async function startLocalRuntime(options = {}) {
         json(ctx.response, 404, { error: "设备不存在" });
         return true;
       }
-      const body = await readJsonBody(ctx.request, { maxBytes: 8 * 1024 });
-      if (!["files.list", "files.read"].includes(body.type)) {
+      const body = await readJsonBody(ctx.request, { maxBytes: 1024 * 1024 });
+      if (!["files.list", "files.read", "files.write"].includes(body.type)) {
         await record("denied", `不支持的命令类型：${body.type}`);
         json(ctx.response, 400, { error: "不支持的命令类型" });
         return true;
@@ -585,10 +585,24 @@ export async function startLocalRuntime(options = {}) {
         json(ctx.response, 400, { error: "路径无效" });
         return true;
       }
+      const payload = { path: target };
+      if (body.type === "files.write") {
+        if (typeof body.content !== "string") {
+          await record("denied", "缺少写入内容");
+          json(ctx.response, 400, { error: "缺少写入内容" });
+          return true;
+        }
+        if (Buffer.byteLength(body.content, "utf8") > 256 * 1024) {
+          await record("denied", "写入内容超过 256 KB");
+          json(ctx.response, 400, { error: "写入内容超过 256 KB" });
+          return true;
+        }
+        payload.content = body.content;
+      }
       const { wait } = deviceChannel.enqueue({
         deviceId: ctx.params.id,
         type: body.type,
-        payload: { path: target },
+        payload,
       });
       const result = await wait;
       await record("ok", `${body.type} ${target}`);

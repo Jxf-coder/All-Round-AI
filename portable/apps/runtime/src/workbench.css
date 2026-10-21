@@ -240,6 +240,7 @@ html.dark .fast-toggle.active{background:rgba(108,132,255,.2);border-color:rgba(
 .device-actions{display:flex;gap:8px;align-items:center}
 .device-probe{display:flex;flex-direction:column;gap:7px;margin-top:4px;padding:9px;border:1px solid var(--hairline);border-radius:9px;background:#f8fafd}
 .device-probe-input{width:100%;padding:7px 9px;border:1px solid var(--hairline);border-radius:8px;background:#fff;color:inherit;font:11px monospace}
+.device-probe-text{width:100%;padding:7px 9px;border:1px solid var(--hairline);border-radius:8px;background:#fff;color:inherit;font:11px monospace;line-height:1.6;resize:vertical}
 .device-probe .panel-note{margin:0}
 .device-files{max-height:220px;margin:0;padding:6px 8px;overflow:auto;list-style:none;border:1px solid var(--hairline);border-radius:8px;background:#fff}
 .device-files li{font:10.5px monospace;line-height:1.8;color:#4c5b70}
@@ -259,7 +260,7 @@ html.dark .device-ticket{background:#101d30;border-color:#8fa0ff55;color:#dce4ff
 html.dark .device-badge{background:#ffffff14;color:#d0def8a8}
 html.dark .device-badge.online{background:#123a2b;color:#5fe0aa}
 html.dark .device-probe{background:#101d30b8;border-color:var(--hairline)}
-html.dark .device-probe-input,html.dark .device-files,html.dark .device-file-text{background:#0d1929;border-color:var(--hairline);color:#dce4ff}
+html.dark .device-probe-input,html.dark .device-probe-text,html.dark .device-files,html.dark .device-file-text{background:#0d1929;border-color:var(--hairline);color:#dce4ff}
 html.dark .device-files li{color:#d0def8a8}
 html.dark .device-files li.directory{color:#dce4ff}
 html.dark .device-audit li{background:#101d30b8;border-color:var(--hairline)}

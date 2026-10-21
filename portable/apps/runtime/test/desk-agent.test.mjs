@@ -292,6 +292,19 @@ test("the CLI pairs, heartbeats and reports status without the token", async () 
     const stored = JSON.parse(await readFile(configPath, "utf8"));
     assert.equal(stored.token, TOKEN);
 
+    const rootedPath = path.join(root, "rooted.json");
+    const rooted = JSON.parse((await run(process.execPath, [
+      cli, "pair",
+      "--server", stub.url,
+      "--ticket", "tkt_good",
+      "--name", "带目录的 PC",
+      "--root", root,
+      "--config", rootedPath,
+    ])).stdout);
+    assert.deepEqual(rooted.device.capabilities, ["files"]);
+    assert.deepEqual(rooted.roots, [root]);
+    assert.deepEqual(JSON.parse(await readFile(rootedPath, "utf8")).roots, [root]);
+
     const beat = JSON.parse((await run(process.execPath, [
       cli, "heartbeat", "--config", configPath,
     ])).stdout);

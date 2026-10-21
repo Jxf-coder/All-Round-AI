@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ import {
   listDirectory,
   readTextFile,
   resolveLocalPath,
+  writeTextFile,
 } from "../src/local-files.mjs";
 
 const run = promisify(execFile);
@@ -120,11 +121,71 @@ test("the CLI lists and reads inside an allowed root only", async () => {
     ])).stdout);
     assert.ok(listed.entries.some((entry) => entry.name === "a.txt"));
 
+    const written = JSON.parse((await run(process.execPath, [
+      cli, "files", "--root", allowed, "--write", path.join(allowed, "cli.txt"), "--text", "from cli\n",
+    ])).stdout);
+    assert.equal(written.size, 9);
+    assert.equal((await readTextFile({ roots: [allowed], target: path.join(allowed, "cli.txt") })).text, "from cli\n");
+
+    const deniedWrite = await run(process.execPath, [
+      cli, "files", "--root", allowed, "--write", path.join(outside, "planted.txt"), "--text", "x",
+    ]).catch((error) => error);
+    assert.equal(deniedWrite.code, 1);
+    assert.match(deniedWrite.stderr, /不在允许访问的目录里/u);
+
     const denied = await run(process.execPath, [
       cli, "files", "--root", allowed, "--read", path.join(outside, "secret.txt"),
     ]).catch((error) => error);
     assert.equal(denied.code, 1);
     assert.match(denied.stderr, /不在允许访问的目录里/u);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("text inside a root can be written, overwritten and read back", async () => {
+  const { base, allowed, outside } = await seed();
+  try {
+    const created = await writeTextFile({
+      roots: [allowed],
+      target: path.join(allowed, "new.txt"),
+      text: "草稿\n第二行\n",
+    });
+    assert.equal(path.basename(created.path), "new.txt");
+    assert.equal(created.size, Buffer.byteLength("草稿\n第二行\n", "utf8"));
+    assert.equal((await readTextFile({ roots: [allowed], target: created.path })).text, "草稿\n第二行\n");
+
+    await writeTextFile({ roots: [allowed], target: path.join(allowed, "a.txt"), text: "replaced" });
+    assert.equal((await readTextFile({ roots: [allowed], target: path.join(allowed, "a.txt") })).text, "replaced");
+
+    // The atomic write must not leave temporary siblings behind.
+    const names = (await listDirectory({ roots: [allowed], target: allowed })).entries.map((entry) => entry.name);
+    assert.deepEqual(names.filter((name) => name.includes(".tmp-")), []);
+
+    if (process.platform !== "win32") {
+      assert.equal((await stat(path.join(allowed, "new.txt"))).mode & 0o777, 0o600);
+    }
+
+    await assert.rejects(
+      writeTextFile({ roots: [allowed], target: path.join(outside, "planted.txt"), text: "x" }),
+      /不在允许访问的目录里/u,
+    );
+    await assert.rejects(
+      writeTextFile({ roots: [allowed], target: path.join(allowed, "missing", "x.txt"), text: "x" }),
+      /目标目录不存在/u,
+    );
+    await assert.rejects(
+      writeTextFile({ roots: [allowed], target: path.join(allowed, "sub"), text: "x" }),
+      /不是文件/u,
+    );
+    await assert.rejects(
+      writeTextFile({ roots: [allowed], target: path.join(allowed, "big-write.txt"), text: "x".repeat(2048), maxBytes: 1024 }),
+      /超过 1024 字节/u,
+    );
+    await assert.rejects(
+      writeTextFile({ roots: [allowed], target: path.join(allowed, "x.txt"), text: null }),
+      /必须是文本/u,
+    );
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -136,6 +197,11 @@ test("a symlink cannot be used to escape a root", { skip: process.platform === "
     const link = path.join(allowed, "escape.txt");
     await symlink(path.join(outside, "secret.txt"), link);
     await assert.rejects(readTextFile({ roots: [allowed], target: link }), /不在允许访问的目录里/u);
+    await assert.rejects(
+      writeTextFile({ roots: [allowed], target: link, text: "planted" }),
+      /不在允许访问的目录里/u,
+    );
+    assert.equal((await readTextFile({ roots: [outside], target: path.join(outside, "secret.txt") })).text, "secret\n");
     const listing = await listDirectory({ roots: [allowed], target: allowed });
     assert.equal(listing.entries.some((entry) => entry.name === "escape.txt"), false);
   } finally {

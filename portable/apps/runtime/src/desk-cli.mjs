@@ -11,7 +11,7 @@ import {
   saveAgentConfig,
   sendHeartbeat,
 } from "./desk-agent.mjs";
-import { listDirectory, readTextFile } from "./local-files.mjs";
+import { listDirectory, readTextFile, writeTextFile } from "./local-files.mjs";
 import { runCommandLoop } from "./desk-channel.mjs";
 import { writeDeskService } from "./desk-service.mjs";
 
@@ -20,7 +20,7 @@ const USAGE = `用法：
   node desk-cli.mjs heartbeat [--config <文件>] [--version <版本>]
   node desk-cli.mjs run       [--config <文件>] [--interval <秒>] [--max-backoff <秒>]
   node desk-cli.mjs service   --out <输出目录> [--config <文件>]
-  node desk-cli.mjs files     --root <允许目录> [--root ...] (--list <目录> | --read <文件>)
+  node desk-cli.mjs files     --root <允许目录> [--root ...] (--list <目录> | --read <文件> | --write <文件> --text <内容>)
   node desk-cli.mjs status    [--config <文件>]
 
 票据由管理员在工作台签发，十分钟内有效且只能使用一次。pair 会把设备令牌写入
@@ -29,8 +29,8 @@ const USAGE = `用法：
 网络失败按指数退避（默认 30 秒起、最长 300 秒），令牌失效则立即停止。service 只
 生成当前平台的用户级服务文件（Linux systemd user、macOS LaunchAgent、Windows 登录
 计划任务），安装仍需手动执行。files 只访问 --root 指定目录内的路径：先解析符号
-链接再校验边界，拒绝越界、二进制与超过 256 KB 的文件。status 只显示配对摘要，
-不会输出令牌。`;
+链接再校验边界，拒绝越界、二进制与超过 256 KB 的文件。--write 先写同目录临时
+文件再原子替换，目标目录必须已存在。status 只显示配对摘要，不会输出令牌。`;
 
 function print(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -66,6 +66,8 @@ try {
       root: { type: "string", multiple: true },
       list: { type: "string" },
       read: { type: "string" },
+      write: { type: "string" },
+      text: { type: "string" },
     },
   });
   const command = positionals[0];
@@ -75,9 +77,12 @@ try {
     if (!values.server) throw new Error("pair 需要 --server");
     if (!values.ticket) throw new Error("pair 需要 --ticket");
     if (!values.name) throw new Error("pair 需要 --name");
+    const roots = values.root ?? [];
     const capabilities = values.capabilities
       ? values.capabilities.split(",").map((entry) => entry.trim()).filter(Boolean)
-      : [];
+      // A desk that exposes roots can serve file commands, so advertise that
+      // instead of showing "未声明能力" for a fully usable device.
+      : roots.length ? ["files"] : [];
     const paired = await pairDevice({
       serverUrl: values.server,
       ticket: values.ticket,
@@ -91,14 +96,14 @@ try {
       serverUrl: paired.serverUrl,
       device: paired.device,
       token: paired.token,
-      roots: values.root ?? [],
+      roots,
     });
     print({
       ok: true,
       config: configPath,
       serverUrl: paired.serverUrl,
       device: paired.device,
-      roots: values.root ?? [],
+      roots,
     });
   } else if (command === "heartbeat") {
     const config = await loadAgentConfig(configPath);
@@ -187,8 +192,16 @@ try {
     } else if (values.read) {
       const result = await readTextFile({ roots, target: path.resolve(values.read) });
       print({ ok: true, ...result });
+    } else if (values.write) {
+      if (values.text === undefined) throw new Error("写入需要 --text");
+      const result = await writeTextFile({
+        roots,
+        target: path.resolve(values.write),
+        text: values.text,
+      });
+      print({ ok: true, ...result });
     } else {
-      throw new Error("files 需要 --list 或 --read");
+      throw new Error("files 需要 --list、--read 或 --write");
     }
   } else if (command === "status") {
     const config = await loadAgentConfig(configPath);

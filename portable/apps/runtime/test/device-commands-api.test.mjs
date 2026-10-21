@@ -282,6 +282,59 @@ test("every privileged command leaves an audit entry, including refusals", async
   }
 });
 
+test("write commands carry their text and refuse oversized or missing content", async () => {
+  const app = await boot();
+  try {
+    const { device, token } = await app.pairDevice("写入工作站");
+
+    const missing = await fetch(`${app.runtime.url}/api/devices/${device.id}/commands`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "files.write", path: "/tmp/a.txt" }),
+    });
+    assert.equal(missing.status, 400);
+    assert.match((await missing.json()).error, /缺少写入内容/u);
+
+    const oversized = await fetch(`${app.runtime.url}/api/devices/${device.id}/commands`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "files.write", path: "/tmp/a.txt", content: "x".repeat(256 * 1024 + 1) }),
+    });
+    assert.equal(oversized.status, 400);
+    assert.match((await oversized.json()).error, /超过 256 KB/u);
+
+    const polling = fetch(`${app.runtime.url}/api/devices/commands?wait=5000`, {
+      headers: { authorization: `Bearer ${token}` },
+    }).then((response) => response.json());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const pending = fetch(`${app.runtime.url}/api/devices/${device.id}/commands`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "files.write", path: "/tmp/a.txt", content: "写入了\n" }),
+    });
+    const polled = await polling;
+    assert.equal(polled.command.type, "files.write");
+    assert.deepEqual(polled.command.payload, { path: "/tmp/a.txt", content: "写入了\n" });
+
+    await fetch(`${app.runtime.url}/api/devices/commands/${polled.command.id}/result`, {
+      method: "POST",
+      headers: app.deviceHeaders(token),
+      body: JSON.stringify({ ok: true, result: { path: "/tmp/a.txt", size: 10 } }),
+    });
+    const settled = await pending;
+    assert.equal(settled.status, 200);
+    assert.equal((await settled.json()).result.size, 10);
+
+    const trail = await (await fetch(`${app.runtime.url}/api/audit?limit=5`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+    assert.equal(trail.entries[0].detail, "files.write /tmp/a.txt");
+    assert.equal(trail.entries[0].outcome, "ok");
+  } finally {
+    await app.close();
+  }
+});
+
 test("a result from another device never settles someone else's command", async () => {
   const app = await boot();
   try {

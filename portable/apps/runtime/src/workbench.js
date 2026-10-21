@@ -1538,7 +1538,7 @@ function deviceCard(device) {
   const browse = actionButton("本机文件", () => {
     deviceProbe = deviceProbe?.deviceId === device.id
       ? null
-      : { deviceId: device.id, path: "", busy: false, result: null, error: null };
+      : { deviceId: device.id, path: "", content: "", busy: false, result: null, error: null };
     renderDeviceBody();
   });
   if (!device.online) {
@@ -1559,12 +1559,20 @@ async function runDeviceCommand(device, type) {
     renderDeviceBody();
     return;
   }
+  if (type === "files.write" && deviceProbe.content === "") {
+    deviceProbe = { ...deviceProbe, error: "请先填写要写入的文本内容。", result: null };
+    renderDeviceBody();
+    return;
+  }
   deviceProbe = { ...deviceProbe, busy: true, error: null, result: null };
   renderDeviceBody();
   try {
+    const payload = type === "files.write"
+      ? { type, path: target, content: deviceProbe.content }
+      : { type, path: target };
     const response = await apiRequest(
       `/api/devices/${encodeURIComponent(device.id)}/commands`,
-      { method: "POST", body: JSON.stringify({ type, path: target }) },
+      { method: "POST", body: JSON.stringify(payload) },
     );
     const body = await response?.json().catch(() => null);
     deviceProbe = response?.ok
@@ -1587,20 +1595,31 @@ function deviceProbeBlock(device) {
   });
   block.append(input);
 
+  const content = element("textarea", "device-probe-text");
+  content.rows = 4;
+  content.placeholder = "要写入的文本内容（最多 256 KB），写入前会先落到同目录的临时文件";
+  content.value = deviceProbe.content;
+  content.addEventListener("input", () => {
+    deviceProbe = { ...deviceProbe, content: content.value };
+  });
+  block.append(content);
+
   const actions = element("div", "device-actions");
   const list = actionButton("列出目录", () => void runDeviceCommand(device, "files.list"));
   const read = actionButton("读取文件", () => void runDeviceCommand(device, "files.read"));
+  const write = actionButton("写入文件", () => void runDeviceCommand(device, "files.write"));
   if (deviceProbe.busy) {
     list.disabled = true;
     read.disabled = true;
+    write.disabled = true;
   }
-  actions.append(list, read);
+  actions.append(list, read, write);
   block.append(actions);
 
   block.append(element(
     "p",
     "panel-note",
-    "只读取配对时 --root 指定的目录；越界路径、二进制与超过 256 KB 的文件会被设备拒绝。",
+    "只读写配对时 --root 指定的目录；越界路径、二进制与超过 256 KB 的文件会被设备拒绝。",
   ));
   if (deviceProbe.busy) block.append(element("p", "panel-note", "已发给设备，等待响应（最多 20 秒）…"));
   if (deviceProbe.error) block.append(element("p", "device-error", deviceProbe.error));
@@ -1633,6 +1652,12 @@ function deviceProbeBlock(device) {
     const pre = element("pre", "device-file-text");
     pre.textContent = result.value?.text ?? "";
     block.append(pre);
+  } else if (result?.type === "files.write") {
+    block.append(element(
+      "p",
+      "device-meta",
+      `已写入 ${result.value?.path || ""} · ${result.value?.size ?? 0} 字节`,
+    ));
   }
   return block;
 }

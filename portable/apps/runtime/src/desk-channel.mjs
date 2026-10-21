@@ -1,6 +1,6 @@
 import { setTimeout as wait } from "node:timers/promises";
 
-import { listDirectory, readTextFile } from "./local-files.mjs";
+import { listDirectory, readTextFile, writeTextFile } from "./local-files.mjs";
 
 // ---------------------------------------------------------------------------
 // Desk side of the command channel.
@@ -10,7 +10,7 @@ import { listDirectory, readTextFile } from "./local-files.mjs";
 // so a workstation behind NAT can still serve the workbench.
 // ---------------------------------------------------------------------------
 
-const COMMAND_TYPES = new Set(["files.list", "files.read"]);
+const COMMAND_TYPES = new Set(["files.list", "files.read", "files.write"]);
 
 function unauthorized() {
   const error = new Error("设备凭据已失效，请重新配对");
@@ -47,6 +47,11 @@ export async function executeCommand({ config, command }) {
   if (typeof target !== "string" || target.trim() === "") throw new Error("设备命令缺少路径");
   if (command.type === "files.list") {
     return listDirectory({ roots: config.roots, target });
+  }
+  if (command.type === "files.write") {
+    const content = command.payload?.content;
+    if (typeof content !== "string") throw new Error("设备命令缺少写入内容");
+    return writeTextFile({ roots: config.roots, target, text: content });
   }
   return readTextFile({ roots: config.roots, target });
 }
