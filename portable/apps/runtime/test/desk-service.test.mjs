@@ -93,6 +93,23 @@ test("the dispatcher picks one file per platform and rejects others", () => {
   assert.throws(() => renderDeskService({ platform: "aix", ...LINUX_PATHS }), /不支持的平台/u);
 });
 
+test("the Windows task script carries a BOM so unicode paths survive PowerShell 5", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "allround-desk-service-bom-"));
+  try {
+    const written = await writeDeskService({
+      platform: "win32",
+      outDir: root,
+      ...WINDOWS_PATHS,
+    });
+    assert.deepEqual(written.files, ["install-desk-task.ps1"]);
+    const content = await readFile(path.join(root, "install-desk-task.ps1"), "utf8");
+    assert.equal(content.charCodeAt(0), 0xfeff);
+    assert.match(content, /Register-ScheduledTask/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("writing a service file and the CLI both work for the current platform", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "allround-desk-service-"));
   try {

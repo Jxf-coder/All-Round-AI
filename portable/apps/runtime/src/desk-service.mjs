@@ -152,7 +152,10 @@ export async function writeDeskService({ platform = process.platform, outDir, no
   const rendered = renderDeskService({ platform, nodePath, mainPath, configPath });
   await mkdir(outDir, { recursive: true, mode: 0o755 });
   for (const file of rendered.files) {
-    await writeFile(path.join(outDir, file.name), file.content, { mode: 0o644 });
+    // Windows PowerShell 5.1 decodes a BOM-less script as ANSI, which mangles
+    // non-ASCII paths; the BOM makes the UTF-8 encoding explicit.
+    const content = file.name.endsWith(".ps1") ? `\uFEFF${file.content}` : file.content;
+    await writeFile(path.join(outDir, file.name), content, { mode: 0o644 });
   }
   return { platform: rendered.platform, directory: outDir, files: rendered.files.map((file) => file.name) };
 }
