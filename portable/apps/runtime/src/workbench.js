@@ -1092,6 +1092,8 @@ let deviceTicket = null;
 // One inline probe at a time: which device the operator opened, the absolute
 // path they typed, and the last command outcome.
 let deviceProbe = null;
+// Audit rows are admin-only; members get a 403 and see a plain notice instead.
+let deviceAudit = null;
 let handoverState = null;
 let intakeEditing = false;
 let intakeNotice = "";
@@ -1478,6 +1480,22 @@ async function refreshDevices() {
   renderDeviceBody();
 }
 
+async function refreshAudit() {
+  try {
+    const response = await apiRequest("/api/audit?limit=8");
+    if (!response?.ok) {
+      deviceAudit = { entries: [], denied: response?.status === 403 };
+    } else {
+      deviceAudit = await response.json();
+    }
+  } catch {
+    deviceAudit = { entries: [], error: "连不上运行时，稍后再试。" };
+  }
+  renderDeviceBody();
+}
+
+const AUDIT_OUTCOMES = { ok: "成功", error: "失败", denied: "拒绝" };
+
 function deviceCard(device) {
   const card = element("div", "device-card");
   const head = element("div", "device-card-head");
@@ -1674,6 +1692,42 @@ function renderDeviceBody() {
   for (const device of devices) list.append(deviceCard(device));
   listBlock.append(list);
   panelBody.append(listBlock);
+
+  const auditBlock = element("section", "device-block");
+  const auditHead = element("div", "device-block-head");
+  auditHead.append(element("h3", null, "最近审计"));
+  auditHead.append(actionButton("刷新", () => void refreshAudit()));
+  auditBlock.append(auditHead);
+  if (deviceAudit === null) {
+    auditBlock.append(element("p", "panel-note", "正在读取审计记录…"));
+  } else if (deviceAudit.denied) {
+    auditBlock.append(element("p", "panel-note", "仅管理员可以查看审计记录。"));
+  } else if (deviceAudit.error) {
+    auditBlock.append(element("p", "device-error", deviceAudit.error));
+  } else {
+    const entries = Array.isArray(deviceAudit.entries) ? deviceAudit.entries : [];
+    if (!entries.length) {
+      auditBlock.append(element("p", "knowledge-empty", "还没有设备命令记录。"));
+    } else {
+      const auditList = element("ul", "device-audit");
+      for (const entry of entries) {
+        const row = element("li");
+        row.append(element(
+          "span",
+          `device-audit-outcome ${entry.outcome}`,
+          AUDIT_OUTCOMES[entry.outcome] ?? entry.outcome,
+        ));
+        row.append(element("span", "device-audit-main", entry.detail || entry.action));
+        row.append(element("span", "device-audit-time", `${entry.actorName || entry.actor} · ${deviceTime(entry.at)}`));
+        auditList.append(row);
+      }
+      auditBlock.append(auditList);
+    }
+    if (deviceAudit.skipped) {
+      auditBlock.append(element("p", "device-error", `有 ${deviceAudit.skipped} 条审计记录无法解析。`));
+    }
+  }
+  panelBody.append(auditBlock);
 }
 
 function renderKnowledgeBody() {
@@ -1988,8 +2042,10 @@ function showPanelView(panel, label) {
     panelCopy.textContent = "把本机 desk 代理配对到工作台。工作台只保存令牌哈希，令牌本身留在设备上。";
     deviceState = null;
     deviceTicket = null;
+    deviceAudit = null;
     renderDeviceBody();
     void refreshDevices();
+    void refreshAudit();
     return;
   }
   if (panel === "database") {

@@ -245,6 +245,14 @@ html.dark .fast-toggle.active{background:rgba(108,132,255,.2);border-color:rgba(
 .device-files li{font:10.5px monospace;line-height:1.8;color:#4c5b70}
 .device-files li.directory{color:#2f3f57;font-weight:600}
 .device-file-text{max-height:260px;margin:0;padding:8px;overflow:auto;border:1px solid var(--hairline);border-radius:8px;background:#fff;font:10.5px monospace;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.device-audit{margin:0;padding:0;display:flex;flex-direction:column;gap:6px;list-style:none}
+.device-audit li{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;padding:6px 8px;border:1px solid var(--hairline);border-radius:8px;background:#ffffffb8}
+.device-audit-outcome{justify-self:start;padding:1px 6px;border-radius:999px;background:#eef1f6;color:#7d8a9e;font-size:9px}
+.device-audit-outcome.ok{background:#e7f8f0;color:#1d9b6c}
+.device-audit-outcome.error{background:#fdeceb;color:#d93b34}
+.device-audit-outcome.denied{background:#fff5e6;color:#b26a00}
+.device-audit-main{align-self:center;font-size:10px;color:#4c5b70;word-break:break-word}
+.device-audit-time{grid-column:1 / -1;font-size:9px;color:#8a97a8}
 html.dark .device-block,html.dark .device-card{background:#16253ba6;border-color:var(--hairline)}
 html.dark .device-meta{color:#d0def87a}
 html.dark .device-ticket{background:#101d30;border-color:#8fa0ff55;color:#dce4ff}
@@ -254,3 +262,6 @@ html.dark .device-probe{background:#101d30b8;border-color:var(--hairline)}
 html.dark .device-probe-input,html.dark .device-files,html.dark .device-file-text{background:#0d1929;border-color:var(--hairline);color:#dce4ff}
 html.dark .device-files li{color:#d0def8a8}
 html.dark .device-files li.directory{color:#dce4ff}
+html.dark .device-audit li{background:#101d30b8;border-color:var(--hairline)}
+html.dark .device-audit-main{color:#d0def8a8}
+html.dark .device-audit-time{color:#d0def86b}

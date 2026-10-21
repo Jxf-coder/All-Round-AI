@@ -217,6 +217,71 @@ test("an unresponsive desk times out and a full queue answers 429", async () => 
   }
 });
 
+test("every privileged command leaves an audit entry, including refusals", async () => {
+  const app = await boot();
+  try {
+    const { device, token } = await app.pairDevice("审计工作站");
+
+    const refused = await fetch(`${app.runtime.url}/api/devices/${device.id}/commands`, {
+      method: "POST",
+      headers: app.member,
+      body: JSON.stringify({ type: "files.list", path: "/tmp" }),
+    });
+    assert.equal(refused.status, 403);
+
+    const invalid = await fetch(`${app.runtime.url}/api/devices/${device.id}/commands`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "process.spawn", path: "/tmp" }),
+    });
+    assert.equal(invalid.status, 400);
+
+    const polling = fetch(`${app.runtime.url}/api/devices/commands?wait=5000`, {
+      headers: { authorization: `Bearer ${token}` },
+    }).then((response) => response.json());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const pending = fetch(`${app.runtime.url}/api/devices/${device.id}/commands`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "files.list", path: "/tmp" }),
+    });
+    const polled = await polling;
+    await fetch(`${app.runtime.url}/api/devices/commands/${polled.command.id}/result`, {
+      method: "POST",
+      headers: app.deviceHeaders(token),
+      body: JSON.stringify({ ok: true, result: { entries: [] } }),
+    });
+    assert.equal((await pending).status, 200);
+
+    const timedOut = await fetch(`${app.runtime.url}/api/devices/${device.id}/commands`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "files.read", path: "/tmp/a.txt" }),
+    });
+    assert.equal(timedOut.status, 504);
+
+    const memberRead = await fetch(`${app.runtime.url}/api/audit`, { headers: { cookie: app.member.cookie } });
+    assert.equal(memberRead.status, 403);
+
+    const read = await fetch(`${app.runtime.url}/api/audit?limit=10`, { headers: { cookie: app.admin.cookie } });
+    assert.equal(read.status, 200);
+    const trail = await read.json();
+    assert.deepEqual(trail.entries.map((entry) => entry.outcome), ["error", "ok", "denied", "denied"]);
+    assert.equal(trail.entries[0].action, "device.command");
+    assert.equal(trail.entries[1].detail, "files.list /tmp");
+    for (const entry of trail.entries) assert.equal(entry.target, device.id);
+    assert.equal(trail.entries[1].actorName, "admin@example.test");
+    assert.equal(trail.entries[2].actorName, "admin@example.test");
+    assert.equal(trail.entries[3].actorName, "member@example.test");
+    assert.equal(JSON.stringify(trail).includes(token), false);
+
+    const badLimit = await fetch(`${app.runtime.url}/api/audit?limit=0`, { headers: { cookie: app.admin.cookie } });
+    assert.equal(badLimit.status, 400);
+  } finally {
+    await app.close();
+  }
+});
+
 test("a result from another device never settles someone else's command", async () => {
   const app = await boot();
   try {

@@ -14,6 +14,7 @@ import { createConfigStore } from "./config-store.mjs";
 import { createConversationStore } from "./conversations.mjs";
 import { createDeviceRegistry, readDeviceToken } from "./devices.mjs";
 import { createDeviceChannel } from "./device-channel.mjs";
+import { createAuditLog } from "./audit.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
 import { buildMemoryBlock, createMemoryStore } from "./memory.mjs";
@@ -257,6 +258,10 @@ export async function startLocalRuntime(options = {}) {
   // Commands travel over the agent's outbound long-poll, so the runtime never
   // needs an inbound port on the desk.
   const deviceChannel = options.deviceChannel ?? createDeviceChannel();
+  // Privileged local actions are written to an append-only trail that survives
+  // the session that triggered them.
+  const auditLog = options.auditLog
+    ?? createAuditLog({ filePath: path.join(directories.logs, "audit.jsonl") });
 
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
@@ -398,6 +403,40 @@ export async function startLocalRuntime(options = {}) {
     return true;
   });
 
+  // The audit trail names accounts and the devices they touched, so only an
+  // administrator may read it.
+  router.get("/api/audit", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    if (actor.role !== "admin") {
+      json(ctx.response, 403, { error: "没有管理员权限" });
+      return true;
+    }
+    try {
+      const requested = Number(ctx.url.searchParams.get("limit") ?? "50");
+      const trail = await auditLog.list({
+        limit: Number.isFinite(requested) ? requested : 50,
+      });
+      // Audit rows store the stable account id; the panel shows the login name
+      // so the trail is readable without a second lookup per row.
+      const names = new Map();
+      for (const user of await accountStore.list()) {
+        names.set(user.id, user.username);
+        names.set(user.username, user.username);
+      }
+      json(ctx.response, 200, {
+        ...trail,
+        entries: trail.entries.map((entry) => ({
+          ...entry,
+          actorName: names.get(entry.actor) ?? entry.actor,
+        })),
+      });
+    } catch (error) {
+      json(ctx.response, 400, { error: error.message || "读取审计记录失败" });
+    }
+    return true;
+  });
+
   // Desk devices. Pairing is the only unauthenticated surface: the single-use
   // ticket is the credential, and the device token it returns is never stored
   // in plain text. Listing and revoking stay behind the normal account gate.
@@ -507,7 +546,23 @@ export async function startLocalRuntime(options = {}) {
   router.post("/api/devices/:id/commands", async (ctx) => {
     const actor = await requireActor(ctx);
     if (!actor) return true;
+    const record = async (outcome, detail) => {
+      try {
+        await auditLog.append({
+          actor: actor.id,
+          action: "device.command",
+          target: ctx.params.id,
+          outcome,
+          detail,
+        });
+      } catch (error) {
+        // A broken audit disk must not hide the policy decision, but it has to
+        // be visible in the runtime log.
+        void logger.warn("Audit entry could not be written", { message: error.message });
+      }
+    };
     if (actor.role !== "admin") {
+      await record("denied", "没有管理员权限");
       json(ctx.response, 403, { error: "没有管理员权限" });
       return true;
     }
@@ -519,12 +574,14 @@ export async function startLocalRuntime(options = {}) {
       }
       const body = await readJsonBody(ctx.request, { maxBytes: 8 * 1024 });
       if (!["files.list", "files.read"].includes(body.type)) {
+        await record("denied", `不支持的命令类型：${body.type}`);
         json(ctx.response, 400, { error: "不支持的命令类型" });
         return true;
       }
       const target = body.path;
       if (typeof target !== "string" || target.trim() === "" || target.length > 4096
         || /[\r\n\0]/u.test(target)) {
+        await record("denied", "路径无效");
         json(ctx.response, 400, { error: "路径无效" });
         return true;
       }
@@ -534,9 +591,11 @@ export async function startLocalRuntime(options = {}) {
         payload: { path: target },
       });
       const result = await wait;
+      await record("ok", `${body.type} ${target}`);
       json(ctx.response, 200, { ok: true, result });
     } catch (error) {
       const status = error.code === "TIMEOUT" ? 504 : error.code === "BUSY" ? 429 : error.status || 400;
+      await record("error", error.message || "命令失败");
       json(ctx.response, status, { error: error.message || "命令失败" });
     }
     return true;
