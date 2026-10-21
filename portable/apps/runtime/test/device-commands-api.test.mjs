@@ -266,14 +266,21 @@ test("every privileged command leaves an audit entry, including refusals", async
     const read = await fetch(`${app.runtime.url}/api/audit?limit=10`, { headers: { cookie: app.admin.cookie } });
     assert.equal(read.status, 200);
     const trail = await read.json();
-    assert.deepEqual(trail.entries.map((entry) => entry.outcome), ["error", "ok", "denied", "denied"]);
-    assert.equal(trail.entries[0].action, "device.command");
-    assert.equal(trail.entries[1].detail, "files.list /tmp");
-    for (const entry of trail.entries) assert.equal(entry.target, device.id);
-    assert.equal(trail.entries[1].actorName, "admin@example.test");
-    assert.equal(trail.entries[2].actorName, "admin@example.test");
-    assert.equal(trail.entries[3].actorName, "member@example.test");
+    const commands = trail.entries.filter((entry) => entry.action === "device.command");
+    assert.deepEqual(commands.map((entry) => entry.outcome), ["error", "ok", "denied", "denied"]);
+    assert.equal(commands[1].detail, "files.list /tmp");
+    for (const entry of commands) assert.equal(entry.target, device.id);
+    assert.equal(commands[0].actorName, "admin@example.test");
+    assert.equal(commands[2].actorName, "admin@example.test");
+    assert.equal(commands[3].actorName, "member@example.test");
+    // Pairing and ticket issuance are privileged too, and the ticket value
+    // itself must never reach the trail.
+    const paired = trail.entries.find((entry) => entry.action === "device.pair");
+    assert.equal(paired.outcome, "ok");
+    assert.equal(paired.target, device.id);
+    assert.equal(trail.entries.some((entry) => entry.action === "device.ticket" && entry.outcome === "ok"), true);
     assert.equal(JSON.stringify(trail).includes(token), false);
+    assert.equal(JSON.stringify(trail).includes("tkt_"), false);
 
     const badLimit = await fetch(`${app.runtime.url}/api/audit?limit=0`, { headers: { cookie: app.admin.cookie } });
     assert.equal(badLimit.status, 400);
@@ -330,6 +337,60 @@ test("write commands carry their text and refuse oversized or missing content", 
     })).json();
     assert.equal(trail.entries[0].detail, "files.write /tmp/a.txt");
     assert.equal(trail.entries[0].outcome, "ok");
+  } finally {
+    await app.close();
+  }
+});
+
+test("refused pairings, ticket issuance and revokes are audited", async () => {
+  const app = await boot();
+  try {
+    const { device } = await app.pairDevice("待移除设备");
+
+    const badPair = await fetch(`${app.runtime.url}/api/devices/pair`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: app.runtime.url },
+      body: JSON.stringify({ ticket: "tkt_not_a_real_ticket", name: "陌生设备", platform: "linux" }),
+    });
+    assert.equal(badPair.status, 401);
+
+    const deniedRevoke = await fetch(`${app.runtime.url}/api/devices/${device.id}`, {
+      method: "DELETE",
+      headers: app.member,
+    });
+    assert.equal(deniedRevoke.status, 403);
+
+    const revoked = await fetch(`${app.runtime.url}/api/devices/${device.id}`, {
+      method: "DELETE",
+      headers: app.admin,
+    });
+    assert.equal(revoked.status, 200);
+
+    const trail = await (await fetch(`${app.runtime.url}/api/audit?limit=20`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+
+    const failedPair = trail.entries.find((entry) => entry.action === "device.pair" && entry.outcome === "denied");
+    assert.equal(failedPair.actor, "anonymous");
+    assert.match(failedPair.detail, /配对票据无效/u);
+
+    const pairOk = trail.entries.find((entry) => entry.action === "device.pair" && entry.outcome === "ok");
+    assert.equal(pairOk.actor, "desk:待移除设备");
+    assert.equal(pairOk.target, device.id);
+
+    assert.equal(
+      trail.entries.some((entry) => entry.action === "device.revoke" && entry.outcome === "denied"),
+      true,
+    );
+    const removed = trail.entries.find((entry) => entry.action === "device.revoke" && entry.outcome === "ok");
+    assert.equal(removed.target, device.id);
+    assert.equal(removed.actorName, "admin@example.test");
+
+    assert.equal(
+      trail.entries.some((entry) => entry.action === "device.ticket" && entry.outcome === "ok"),
+      true,
+    );
+    assert.equal(JSON.stringify(trail).includes("tkt_"), false);
   } finally {
     await app.close();
   }

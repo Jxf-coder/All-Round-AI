@@ -263,6 +263,16 @@ export async function startLocalRuntime(options = {}) {
   const auditLog = options.auditLog
     ?? createAuditLog({ filePath: path.join(directories.logs, "audit.jsonl") });
 
+  // A broken audit disk must not hide the policy decision, but it has to be
+  // visible in the runtime log.
+  async function recordAudit(entry) {
+    try {
+      await auditLog.append(entry);
+    } catch (error) {
+      void logger.warn("Audit entry could not be written", { message: error.message });
+    }
+  }
+
   // Every authenticated API shares the same gate: a valid session, and a
   // completed first-login password change. Handlers stay free of auth details.
   async function requireActor(ctx) {
@@ -450,10 +460,24 @@ export async function startLocalRuntime(options = {}) {
     const actor = await requireActor(ctx);
     if (!actor) return true;
     if (actor.role !== "admin") {
+      await recordAudit({
+        actor: actor.id,
+        action: "device.ticket",
+        outcome: "denied",
+        detail: "没有管理员权限",
+      });
       json(ctx.response, 403, { error: "没有管理员权限" });
       return true;
     }
-    json(ctx.response, 201, deviceRegistry.issueTicket({ actorId: actor.id }));
+    const issued = deviceRegistry.issueTicket({ actorId: actor.id });
+    // The ticket itself is deliberately absent from the trail.
+    await recordAudit({
+      actor: actor.id,
+      action: "device.ticket",
+      outcome: "ok",
+      detail: "签发配对票据",
+    });
+    json(ctx.response, 201, issued);
     return true;
   });
 
@@ -467,8 +491,23 @@ export async function startLocalRuntime(options = {}) {
         version: body.version,
         capabilities: body.capabilities,
       });
+      await recordAudit({
+        actor: `desk:${result.device.name}`,
+        action: "device.pair",
+        target: result.device.id,
+        outcome: "ok",
+        detail: `${result.device.platform} · ${result.device.name}`,
+      });
       json(ctx.response, 201, result);
     } catch (error) {
+      // Failed pairings are usually typos but also the shape of a guessing
+      // attempt, so they are worth a row.
+      await recordAudit({
+        actor: "anonymous",
+        action: "device.pair",
+        outcome: "denied",
+        detail: error.message || "配对失败",
+      });
       json(ctx.response, error.status || 400, { error: error.message || "配对失败" });
     }
     return true;
@@ -546,21 +585,13 @@ export async function startLocalRuntime(options = {}) {
   router.post("/api/devices/:id/commands", async (ctx) => {
     const actor = await requireActor(ctx);
     if (!actor) return true;
-    const record = async (outcome, detail) => {
-      try {
-        await auditLog.append({
-          actor: actor.id,
-          action: "device.command",
-          target: ctx.params.id,
-          outcome,
-          detail,
-        });
-      } catch (error) {
-        // A broken audit disk must not hide the policy decision, but it has to
-        // be visible in the runtime log.
-        void logger.warn("Audit entry could not be written", { message: error.message });
-      }
-    };
+    const record = (outcome, detail) => recordAudit({
+      actor: actor.id,
+      action: "device.command",
+      target: ctx.params.id,
+      outcome,
+      detail,
+    });
     if (actor.role !== "admin") {
       await record("denied", "没有管理员权限");
       json(ctx.response, 403, { error: "没有管理员权限" });
@@ -619,6 +650,13 @@ export async function startLocalRuntime(options = {}) {
     const actor = await requireActor(ctx);
     if (!actor) return true;
     if (actor.role !== "admin") {
+      await recordAudit({
+        actor: actor.id,
+        action: "device.revoke",
+        target: ctx.params.id,
+        outcome: "denied",
+        detail: "没有管理员权限",
+      });
       json(ctx.response, 403, { error: "没有管理员权限" });
       return true;
     }
@@ -628,6 +666,13 @@ export async function startLocalRuntime(options = {}) {
         json(ctx.response, 404, { error: "设备不存在" });
         return true;
       }
+      await recordAudit({
+        actor: actor.id,
+        action: "device.revoke",
+        target: ctx.params.id,
+        outcome: "ok",
+        detail: "移除设备",
+      });
       json(ctx.response, 200, { removed: true });
     } catch (error) {
       json(ctx.response, error.status || 400, { error: error.message || "移除失败" });
