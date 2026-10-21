@@ -7,9 +7,12 @@ import test from "node:test";
 import {
   AUDIO_FORMATS,
   VIDEO_HEIGHTS,
+  VIDEO_QUALITIES,
+  VIDEO_SPECS,
   createAudioExtractHandler,
   createMediaInventoryHandler,
   createVideoNormalizeHandler,
+  createVideoReframeHandler,
   mediaKindOf,
   scanMediaDirectory,
 } from "../src/automation-media.mjs";
@@ -527,6 +530,189 @@ test("a failed encode or cover removes both partial files", async () => {
     await assert.rejects(readFile(path.join(artifacts, "run_media", "video.mp4")), /ENOENT/u);
     await assert.rejects(readFile(path.join(artifacts, "run_media", "cover.jpg")), /ENOENT/u);
   });
+});
+
+// --- platform reframing --------------------------------------------------
+
+function reframeHandler({ media, artifacts, runner, mediaProbe = async () => toolsAvailable() }) {
+  return createVideoReframeHandler({
+    sourceStore: { list: async () => ({ roots: [media] }) },
+    artifactsDir: artifacts,
+    mediaProbe,
+    runner,
+  });
+}
+
+test("platform reframing writes every selected canvas with padding", async () => {
+  assert.deepEqual(VIDEO_QUALITIES, [1080, 720, 540]);
+  assert.deepEqual(Object.keys(VIDEO_SPECS), ["landscape", "vertical", "square"]);
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const calls = [];
+    const handler = reframeHandler({ media, artifacts, runner: normalizeRunner({ calls }) });
+    const outcome = await handler["media.reframe-video"]({
+      run: runLike(),
+      params: { source, quality: "720", landscape: true, vertical: true, square: true },
+    });
+
+    assert.deepEqual(outcome.artifacts.map((entry) => entry.slot), ["landscape", "vertical", "square"]);
+    assert.deepEqual(outcome.artifacts.map((entry) => entry.label), [
+      "横屏 16:9（1280×720）",
+      "竖屏 9:16（720×1280）",
+      "方屏 1:1（720×720）",
+    ]);
+    assert.deepEqual(outcome.artifacts.map((entry) => path.basename(entry.path)), [
+      "landscape.mp4",
+      "vertical.mp4",
+      "square.mp4",
+    ]);
+
+    const encodes = calls.filter((call) => call.args.includes("-c:v"));
+    assert.equal(encodes.length, 3);
+    for (const [index, expected] of [
+      ["1280:720", "1280:720"],
+      ["720:1280", "720:1280"],
+      ["720:720", "720:720"],
+    ].entries()) {
+      const filter = encodes[index].args[encodes[index].args.indexOf("-vf") + 1];
+      assert.ok(filter.startsWith(`scale=${expected[0]}:force_original_aspect_ratio=decrease,`), filter);
+      assert.ok(filter.includes(`pad=${expected[1]}:(ow-iw)/2:(oh-ih)/2:color=black`), filter);
+      assert.ok(filter.endsWith("setsar=1"), filter);
+    }
+    assert.equal(encodes[0].options.timeout, 120_000);
+    assert.match(outcome.logs[1], /^规格：横屏 16:9（1280×720）；竖屏 9:16（720×1280）；方屏 1:1（720×720）$/u);
+    assert.equal(outcome.logs[2], "输出 3 个文件，共 3.0 KB");
+  });
+});
+
+test("platform reframing honours a single canvas and the 1080 tier", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const calls = [];
+    const handler = reframeHandler({ media, artifacts, runner: normalizeRunner({ calls }) });
+    const outcome = await handler["media.reframe-video"]({
+      run: runLike(),
+      params: { source, quality: "1080", landscape: false, vertical: true, square: false },
+    });
+    assert.deepEqual(outcome.artifacts.map((entry) => entry.slot), ["vertical"]);
+    assert.equal(outcome.artifacts[0].label, "竖屏 9:16（1080×1920）");
+    const encode = calls.find((call) => call.args.includes("-c:v"));
+    assert.match(encode.args[encode.args.indexOf("-vf") + 1], /^scale=1080:1920:/u);
+  });
+});
+
+test("platform reframing refuses empty or invalid selections and sources without video", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const handler = reframeHandler({ media, artifacts, runner: normalizeRunner() });
+    await assert.rejects(
+      handler["media.reframe-video"]({
+        run: runLike(),
+        params: { source, quality: "720", landscape: false, vertical: false, square: false },
+      }),
+      /至少要选择一种输出规格/u,
+    );
+    await assert.rejects(
+      handler["media.reframe-video"]({
+        run: runLike(),
+        params: { source, quality: "900", landscape: true, vertical: false, square: false },
+      }),
+      /目标规格无效/u,
+    );
+
+    const audioOnly = async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({ format: { duration: "3" }, streams: [{ codec_type: "audio" }] }),
+          stderr: "",
+        };
+      }
+      throw new Error("should not encode");
+    };
+    await assert.rejects(
+      reframeHandler({ media, artifacts, runner: audioOnly })["media.reframe-video"]({
+        run: runLike(),
+        params: { source, quality: "720", landscape: true, vertical: false, square: false },
+      }),
+      /没有视频轨/u,
+    );
+
+    await assert.rejects(
+      reframeHandler({
+        media,
+        artifacts,
+        runner: normalizeRunner(),
+        mediaProbe: async () => ({
+          ffmpeg: { available: false, reason: "未安装" },
+          ffprobe: { available: false, reason: "未安装" },
+        }),
+      })["media.reframe-video"]({
+        run: runLike(),
+        params: { source, quality: "720", landscape: true, vertical: false, square: false },
+      }),
+      /未检测到 FFmpeg/u,
+    );
+  });
+});
+
+test("a failed canvas removes every file produced by the run", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    let encodes = 0;
+    const runner = async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { duration: "4" },
+            streams: [{ codec_type: "video", codec_name: "h264", width: 1280, height: 720 }],
+          }),
+          stderr: "",
+        };
+      }
+      encodes += 1;
+      const output = args[args.length - 1];
+      if (encodes === 2) {
+        await writeFile(output, Buffer.alloc(32, 1));
+        throw new Error("second canvas failed");
+      }
+      await writeFile(output, Buffer.alloc(1024, 2));
+      return { stdout: "", stderr: "" };
+    };
+    await assert.rejects(
+      reframeHandler({ media, artifacts, runner })["media.reframe-video"]({
+        run: runLike(),
+        params: { source, quality: "720", landscape: true, vertical: true, square: false },
+      }),
+      (error) => {
+        assert.equal(error.message, "多规格转码失败：second canvas failed");
+        return true;
+      },
+    );
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "landscape.mp4")), /ENOENT/u);
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "vertical.mp4")), /ENOENT/u);
+  });
+});
+
+test("platform reframing refuses to be built without its dependencies", () => {
+  assert.throws(
+    () => createVideoReframeHandler({
+      sourceStore: null,
+      artifactsDir: os.tmpdir(),
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /来源配置/u,
+  );
+  assert.throws(
+    () => createVideoReframeHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: "relative",
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /产物目录必须是绝对路径/u,
+  );
+  assert.throws(
+    () => createVideoReframeHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: os.tmpdir(),
+    }),
+    /媒体工具探测/u,
+  );
 });
 
 test("video normalisation refuses to be built without its dependencies", () => {

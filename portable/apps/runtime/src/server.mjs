@@ -24,6 +24,7 @@ import {
   createAudioExtractHandler,
   createMediaInventoryHandler,
   createVideoNormalizeHandler,
+  createVideoReframeHandler,
 } from "./automation-media.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
@@ -356,6 +357,12 @@ export async function startLocalRuntime(options = {}) {
         runner: options.mediaRun,
       }),
       ...createVideoNormalizeHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+        mediaProbe,
+        runner: options.mediaRun,
+      }),
+      ...createVideoReframeHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
         mediaProbe,

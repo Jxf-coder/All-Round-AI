@@ -401,6 +401,73 @@ export const AUTOMATION_PIPELINES = Object.freeze([
       },
     ],
   },
+  {
+    id: "video-reframe",
+    name: "多规格转码",
+    desc: "把来源白名单内的视频转成横屏 16:9、竖屏 9:16、方屏 1:1 三种平台规格，按比例缩放并补边，不裁切画面。",
+    steps: [
+      {
+        id: "reframe",
+        name: "转平台规格",
+        runner: "app",
+        desc: "按所选规格逐个转码；画面等比缩放后居中补黑边，宽高取平台标准尺寸。",
+        action: "media.reframe-video",
+        outputs: [
+          { slot: "landscape", label: "横屏 16:9" },
+          { slot: "vertical", label: "竖屏 9:16" },
+          { slot: "square", label: "方屏 1:1" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "源文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的绝对路径",
+          },
+          {
+            key: "quality",
+            label: "输出规格",
+            type: "select",
+            default: "720",
+            options: [
+              { value: "1080", label: "1080 档（1920×1080 / 1080×1920 / 1080×1080）" },
+              { value: "720", label: "720 档（1280×720 / 720×1280 / 720×720）" },
+              { value: "540", label: "540 档（960×540 / 540×960 / 540×540）" },
+            ],
+            hint: "平台规格是固定画布，小尺寸源会被放大并补边",
+          },
+          {
+            key: "landscape",
+            label: "横屏 16:9",
+            type: "toggle",
+            default: true,
+          },
+          {
+            key: "vertical",
+            label: "竖屏 9:16",
+            type: "toggle",
+            default: true,
+          },
+          {
+            key: "square",
+            label: "方屏 1:1",
+            type: "toggle",
+            default: false,
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "逐个预览输出规格后结束本次运行。",
+        after: ["reframe"],
+        manualHint: "确认各规格画面无裁切后点击「我做完了」",
+      },
+    ],
+  },
 ]);
 
 function fail(message) {

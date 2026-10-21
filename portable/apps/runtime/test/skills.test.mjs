@@ -52,7 +52,9 @@ test("the catalog lists implemented capabilities and keeps later phases visible"
     assert.equal(skills.get("video-normalize").enabled, true);
     assert.equal(skills.get("video-normalize").available, false);
     assert.match(skills.get("video-normalize").reason, /FFmpeg/);
-    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 12, available: 7, comingSoon: 4 });
+    assert.equal(skills.get("video-reframe").enabled, true);
+    assert.equal(skills.get("video-reframe").available, false);
+    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 13, available: 7, comingSoon: 4 });
   } finally {
     await fixture.close();
   }
@@ -96,6 +98,7 @@ test("media skills follow the detected FFmpeg install", async () => {
     assert.equal(missing.get("audio-extract").available, false);
     assert.match(missing.get("audio-extract").reason, /未安装，或不在 PATH 里/u);
     assert.equal(missing.get("video-normalize").available, false);
+    assert.equal(missing.get("video-reframe").available, false);
     assert.equal(missing.get("media-inventory").available, true);
 
     const ready = byId(await fixture.store.list([], {
@@ -104,6 +107,7 @@ test("media skills follow the detected FFmpeg install", async () => {
     assert.equal(ready.get("audio-extract").available, true);
     assert.equal(ready.get("audio-extract").reason, "");
     assert.equal(ready.get("video-normalize").available, true);
+    assert.equal(ready.get("video-reframe").available, true);
     assert.equal(ready.get("media-inventory").available, true);
   } finally {
     await fixture.close();
@@ -156,5 +160,6 @@ test("command and pipeline mappings stay inside the catalog", () => {
   assert.equal(skillForPipeline("media-inventory"), "media-inventory");
   assert.equal(skillForPipeline("audio-extract"), "audio-extract");
   assert.equal(skillForPipeline("video-normalize"), "video-normalize");
+  assert.equal(skillForPipeline("video-reframe"), "video-reframe");
   assert.equal(skillForPipeline("unknown"), null);
 });

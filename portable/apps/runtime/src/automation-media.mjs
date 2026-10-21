@@ -375,6 +375,128 @@ export function createVideoNormalizeHandler({
   });
 }
 
+export const VIDEO_SPECS = Object.freeze({
+  landscape: { ratio: "16:9", label: "横屏 16:9", file: "landscape.mp4", default: true },
+  vertical: { ratio: "9:16", label: "竖屏 9:16", file: "vertical.mp4", default: true },
+  square: { ratio: "1:1", label: "方屏 1:1", file: "square.mp4", default: false },
+});
+
+export const VIDEO_QUALITIES = Object.freeze([1080, 720, 540]);
+
+function specDimensions(ratio, base) {
+  if (ratio === "16:9") return { width: Math.round((base * 16) / 9), height: base };
+  if (ratio === "9:16") return { width: base, height: Math.round((base * 16) / 9) };
+  return { width: base, height: base };
+}
+
+// Distribution needs exact canvases, so this pipeline fits the source inside
+// each platform frame and pads the remainder instead of cropping content. It is
+// the only media step allowed to upscale, because a platform spec is fixed.
+export function createVideoReframeHandler({
+  sourceStore,
+  artifactsDir,
+  mediaProbe,
+  runner,
+} = {}) {
+  if (!sourceStore || typeof sourceStore.list !== "function") {
+    throw new TypeError("多规格转码需要来源配置");
+  }
+  if (typeof artifactsDir !== "string" || !path.isAbsolute(artifactsDir)) {
+    throw new TypeError("产物目录必须是绝对路径");
+  }
+  if (typeof mediaProbe !== "function") throw new TypeError("多规格转码需要媒体工具探测");
+
+  return Object.freeze({
+    "media.reframe-video": async ({ run, params }) => {
+      const tools = await mediaProbe();
+      if (!tools?.ffmpeg?.available || !tools?.ffprobe?.available) {
+        throw new Error("未检测到 FFmpeg/ffprobe，请安装后重试（或设置 FFMPEG_PATH/FFPROBE_PATH）");
+      }
+      const quality = Number(params.quality ?? 720);
+      if (!VIDEO_QUALITIES.includes(quality)) throw new Error("目标规格无效");
+      const targets = Object.entries(VIDEO_SPECS)
+        .filter(([slot, spec]) => (params[slot] ?? spec.default) === true);
+      if (!targets.length) throw new Error("至少要选择一种输出规格");
+      const roots = (await sourceStore.list()).roots;
+      const source = await resolveAllowedFile(params.source, roots);
+
+      let media;
+      try {
+        media = await probeMediaFile({
+          ffprobePath: tools.ffprobe.path,
+          filePath: source,
+          runner,
+        });
+      } catch (error) {
+        throw new Error(`无法读取媒体信息：${error.message}`);
+      }
+      if (!media.video) throw new Error("源文件没有视频轨");
+
+      const directory = path.join(artifactsDir, safeRunName(run.id));
+      await mkdir(directory, { recursive: true });
+      const timeoutMs = media.duration
+        ? Math.min(Math.max(Math.ceil(media.duration * 4_000), 120_000), 1_800_000)
+        : 600_000;
+      const artifacts = [];
+      const produced = [];
+      try {
+        for (const [slot, spec] of targets) {
+          const { width, height } = specDimensions(spec.ratio, quality);
+          const file = path.join(directory, spec.file);
+          produced.push(file);
+          await rm(file, { force: true }).catch(() => {});
+          const filter = `scale=${width}:${height}:force_original_aspect_ratio=decrease,`
+            + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1`;
+          await runMediaTool({
+            command: tools.ffmpeg.path,
+            args: [
+              "-hide_banner", "-nostdin", "-y",
+              "-i", source,
+              "-vf", filter,
+              "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+              "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+              "-c:a", "aac", "-b:a", "160k",
+              file,
+            ],
+            timeoutMs,
+            runner,
+          });
+          let output;
+          try {
+            output = await stat(file);
+          } catch {
+            throw new Error(`${spec.label} 没有生成输出文件`);
+          }
+          if (!output.isFile() || output.size === 0) throw new Error(`${spec.label} 输出文件为空`);
+          artifacts.push({
+            slot,
+            label: `${spec.label}（${width}×${height}）`,
+            path: file,
+            bytes: output.size,
+          });
+        }
+      } catch (error) {
+        await Promise.all(produced.map((file) => rm(file, { force: true }).catch(() => {})));
+        const detail = String(error?.message ?? "未知错误").split(/\r?\n/u)[0].slice(0, 300);
+        throw new Error(`多规格转码失败：${detail}`);
+      }
+
+      const total = artifacts.reduce((sum, artifact) => sum + artifact.bytes, 0);
+      const resolution = media.video.width && media.video.height
+        ? `${media.video.width}×${media.video.height}`
+        : "未知分辨率";
+      return {
+        artifacts,
+        logs: [
+          `源文件：${path.basename(source)}；${resolution}，时长 ${durationText(media.duration)}`,
+          `规格：${artifacts.map((artifact) => artifact.label).join("；")}`,
+          `输出 ${artifacts.length} 个文件，共 ${formatSize(total)}`,
+        ],
+      };
+    },
+  });
+}
+
 // Audio extraction probes the source first, refuses files without an audio
 // track, and removes a partial output when the encoder fails so the run never
 // points at a broken artifact.

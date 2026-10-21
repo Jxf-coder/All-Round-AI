@@ -113,8 +113,8 @@ test("the catalog is readable by any session and reports missing desk capability
     });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(body.skills.length, 16);
-    assert.equal(body.stats.enabled, 12);
+    assert.equal(body.skills.length, 17);
+    assert.equal(body.stats.enabled, 13);
     assert.equal(body.stats.available, 7);
     assert.equal(body.stats.comingSoon, 4);
 
@@ -164,7 +164,7 @@ test("only an administrator can flip a switch and every attempt is audited", asy
     assert.equal(off.status, 200);
     const listed = await off.json();
     assert.equal(listed.skills.find((skill) => skill.id === "local-screen").enabled, false);
-    assert.equal(listed.stats.enabled, 11);
+    assert.equal(listed.stats.enabled, 12);
 
     const audit = await (await fetch(`${app.runtime.url}/api/audit?limit=100`, {
       headers: { cookie: app.admin.cookie },

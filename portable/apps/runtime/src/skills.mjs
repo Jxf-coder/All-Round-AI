@@ -127,6 +127,17 @@ export const SKILLS = Object.freeze([
     hint: "需要 FFmpeg/ffprobe；只缩小不放大，竖屏与横屏都保持原比例。",
   },
   {
+    id: "video-reframe",
+    name: "多规格转码",
+    category: "production",
+    icon: "⇱",
+    runner: "app",
+    pipelineId: "video-reframe",
+    requiresMedia: "ffmpeg",
+    desc: "把白名单内的视频转成横屏 16:9、竖屏 9:16、方屏 1:1 三种平台规格，补边不裁切。",
+    hint: "需要 FFmpeg/ffprobe；平台画布固定，小尺寸源会被放大并补边。",
+  },
+  {
     id: "media-render",
     name: "影音成片",
     category: "production",
