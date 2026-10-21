@@ -482,6 +482,54 @@ test("process commands validate their payload and outlive the default command ti
   }
 });
 
+test("screen commands need no payload and return a full-size screenshot", async () => {
+  const app = await boot();
+  try {
+    const { device, token } = await app.pairDevice("截图工作站");
+    const endpoint = `${app.runtime.url}/api/devices/${device.id}/commands`;
+
+    const polling = fetch(`${app.runtime.url}/api/devices/commands?wait=5000`, {
+      headers: { authorization: `Bearer ${token}` },
+    }).then((response) => response.json());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const pending = fetch(endpoint, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ type: "screen.capture" }),
+    });
+    const polled = await polling;
+    assert.equal(polled.command.type, "screen.capture");
+    assert.deepEqual(polled.command.payload, {});
+
+    // A 2 MB base64 payload used to be rejected by the 1 MB result limit.
+    const data = Buffer.alloc(1_500_000, 7).toString("base64");
+    const accepted = await fetch(`${app.runtime.url}/api/devices/commands/${polled.command.id}/result`, {
+      method: "POST",
+      headers: app.deviceHeaders(token),
+      body: JSON.stringify({
+        ok: true,
+        result: { format: "png", bytes: 1_500_000, width: 2560, height: 1440, data },
+      }),
+    });
+    assert.equal(accepted.status, 202);
+    assert.equal((await accepted.json()).accepted, true);
+
+    const settled = await pending;
+    assert.equal(settled.status, 200);
+    const body = await settled.json();
+    assert.equal(body.result.width, 2560);
+    assert.equal(body.result.data.length, data.length);
+
+    const trail = await (await fetch(`${app.runtime.url}/api/audit?limit=5`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+    assert.equal(trail.entries[0].detail, "screen.capture");
+    assert.equal(trail.entries[0].outcome, "ok");
+  } finally {
+    await app.close();
+  }
+});
+
 test("a result from another device never settles someone else's command", async () => {
   const app = await boot();
   try {

@@ -16,7 +16,7 @@ import { runCommandLoop } from "./desk-channel.mjs";
 import { writeDeskService } from "./desk-service.mjs";
 
 const USAGE = `用法：
-  node desk-cli.mjs pair      --server <实例地址> --ticket <配对票据> --name <设备名称> [--root <允许目录> ...] [--allow <程序> ...] [--version <版本>] [--platform <平台>] [--capabilities a,b] [--config <文件>]
+  node desk-cli.mjs pair      --server <实例地址> --ticket <配对票据> --name <设备名称> [--root <允许目录> ...] [--allow <程序> ...] [--screen] [--version <版本>] [--platform <平台>] [--capabilities a,b] [--config <文件>]
   node desk-cli.mjs heartbeat [--config <文件>] [--version <版本>]
   node desk-cli.mjs run       [--config <文件>] [--interval <秒>] [--max-backoff <秒>]
   node desk-cli.mjs service   --out <输出目录> [--config <文件>]
@@ -26,13 +26,14 @@ const USAGE = `用法：
 票据由管理员在工作台签发，十分钟内有效且只能使用一次。pair 会把设备令牌写入
 配置文件（默认位于本机数据目录的 desk-agent.json，权限 0600），--root 记录允许
 工作台访问的绝对目录，--allow 记录允许运行的程序（执行时按解析后的真实路径比较，
-不经 shell、不继承环境变量）。run 常驻上报心跳并长轮询执行命令（files.list /
-files.read / files.write / process.run），网络失败按指数退避（默认 30 秒起、最长
-300 秒），令牌失效则立即停止。service 只生成当前平台的用户级服务文件（Linux
-systemd user、macOS LaunchAgent、Windows 登录计划任务），安装仍需手动执行。
-files 只访问 --root 指定目录内的路径：先解析符号链接再校验边界，拒绝越界、二进制
-与超过 256 KB 的文件。--write 先写同目录临时文件再原子替换，目标目录必须已存在。
-status 只显示配对摘要，不会输出令牌。`;
+不经 shell、不继承环境变量），--screen 开放屏幕截图（Windows 需已登录桌面，macOS
+首次会请求「屏幕录制」权限）。run 常驻上报心跳并长轮询执行命令（files.list /
+files.read / files.write / process.run / screen.capture），网络失败按指数退避
+（默认 30 秒起、最长 300 秒），令牌失效则立即停止。service 只生成当前平台的用户级
+服务文件（Linux systemd user、macOS LaunchAgent、Windows 登录计划任务），安装仍需
+手动执行。files 只访问 --root 指定目录内的路径：先解析符号链接再校验边界，拒绝
+越界、二进制与超过 256 KB 的文件。--write 先写同目录临时文件再原子替换，目标目录
+必须已存在。status 只显示配对摘要，不会输出令牌。`;
 
 function print(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -67,6 +68,7 @@ try {
       out: { type: "string" },
       root: { type: "string", multiple: true },
       allow: { type: "string", multiple: true },
+      screen: { type: "boolean" },
       list: { type: "string" },
       read: { type: "string" },
       write: { type: "string" },
@@ -82,9 +84,11 @@ try {
     if (!values.name) throw new Error("pair 需要 --name");
     const roots = values.root ?? [];
     const allow = values.allow ?? [];
+    const screen = values.screen === true;
     const declared = [];
     if (roots.length) declared.push("files");
     if (allow.length) declared.push("process");
+    if (screen) declared.push("screen");
     const capabilities = values.capabilities
       ? values.capabilities.split(",").map((entry) => entry.trim()).filter(Boolean)
       // A desk that exposes roots or programs can serve those commands, so
@@ -105,6 +109,7 @@ try {
       token: paired.token,
       roots,
       allow,
+      screen,
     });
     print({
       ok: true,
@@ -113,6 +118,7 @@ try {
       device: paired.device,
       roots,
       allow,
+      screen,
     });
   } else if (command === "heartbeat") {
     const config = await loadAgentConfig(configPath);
@@ -225,6 +231,7 @@ try {
       pairedAt: config.pairedAt,
       roots: config.roots,
       allow: config.allow,
+      screen: config.screen,
     });
   } else {
     process.stderr.write(`${USAGE}\n`);

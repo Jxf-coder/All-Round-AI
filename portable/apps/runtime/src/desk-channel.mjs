@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { listDirectory, readTextFile, resolveLocalPath, writeTextFile } from "./local-files.mjs";
 import { resolveAllowedProgram, runProcess } from "./local-process.mjs";
+import { captureScreen } from "./local-screen.mjs";
 
 // ---------------------------------------------------------------------------
 // Desk side of the command channel.
@@ -12,7 +13,7 @@ import { resolveAllowedProgram, runProcess } from "./local-process.mjs";
 // so a workstation behind NAT can still serve the workbench.
 // ---------------------------------------------------------------------------
 
-const COMMAND_TYPES = new Set(["files.list", "files.read", "files.write", "process.run"]);
+const COMMAND_TYPES = new Set(["files.list", "files.read", "files.write", "process.run", "screen.capture"]);
 
 function unauthorized() {
   const error = new Error("设备凭据已失效，请重新配对");
@@ -39,10 +40,17 @@ export async function fetchNextCommand({
   return body?.command ?? null;
 }
 
-export async function executeCommand({ config, command }) {
+export async function executeCommand({ config, command, captureImpl = captureScreen }) {
   if (!command || typeof command.type !== "string") throw new Error("设备命令格式无效");
   if (!COMMAND_TYPES.has(command.type)) throw new Error(`不支持的设备命令：${command.type}`);
   const payload = command.payload ?? {};
+
+  if (command.type === "screen.capture") {
+    if (config.screen !== true) {
+      throw new Error("设备没有开启屏幕能力，请重新配对并添加 --screen");
+    }
+    return captureImpl();
+  }
 
   if (command.type === "process.run") {
     const program = await resolveAllowedProgram({ allow: config.allow, command: payload.command });

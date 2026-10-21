@@ -177,10 +177,12 @@ test("the config records allowed roots and refuses relative or malformed ones", 
       token: TOKEN,
       roots: [allowed, `${allowed}${path.sep}`, allowed],
       allow: [process.execPath, process.execPath],
+      screen: true,
     });
     const loaded = await loadAgentConfig(configPath);
     assert.deepEqual(loaded.roots, [allowed]);
     assert.deepEqual(loaded.allow, [process.execPath]);
+    assert.equal(loaded.screen, true);
 
     await assert.rejects(
       saveAgentConfig({
@@ -223,6 +225,26 @@ test("the config records allowed roots and refuses relative or malformed ones", 
       roots: ["relative/path"],
     }));
     await assert.rejects(loadAgentConfig(configPath), /允许目录或允许程序无效/u);
+
+    await writeFile(configPath, JSON.stringify({
+      schema: 1,
+      serverUrl: "http://127.0.0.1:3141",
+      deviceId: "dev-0123456789ab",
+      name: "x",
+      token: TOKEN,
+      screen: "yes",
+    }));
+    await assert.rejects(loadAgentConfig(configPath), /屏幕开关无效/u);
+
+    // Without the flag the config keeps screen off, so a missing field never
+    // silently grants the ability.
+    await saveAgentConfig({
+      filePath: configPath,
+      serverUrl: "http://127.0.0.1:3141",
+      device: { id: "dev-0123456789ab", name: "办公室 PC", platform: "win32", pairedAt: "2026-10-20T08:00:00.000Z" },
+      token: TOKEN,
+    });
+    assert.equal((await loadAgentConfig(configPath)).screen, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -330,6 +352,23 @@ test("the CLI pairs, heartbeats and reports status without the token", async () 
     assert.deepEqual(withProgram.device.capabilities, ["process"]);
     assert.deepEqual(withProgram.allow, [process.execPath]);
     assert.deepEqual(JSON.parse(await readFile(processPath, "utf8")).allow, [process.execPath]);
+
+    const screenPath = path.join(root, "screen.json");
+    const withScreen = JSON.parse((await run(process.execPath, [
+      cli, "pair",
+      "--server", stub.url,
+      "--ticket", "tkt_good",
+      "--name", "可截屏的 PC",
+      "--screen",
+      "--config", screenPath,
+    ])).stdout);
+    assert.deepEqual(withScreen.device.capabilities, ["screen"]);
+    assert.equal(withScreen.screen, true);
+    assert.equal(JSON.parse(await readFile(screenPath, "utf8")).screen, true);
+    const screenStatus = JSON.parse((await run(process.execPath, [
+      cli, "status", "--config", screenPath,
+    ])).stdout);
+    assert.equal(screenStatus.screen, true);
 
     const beat = JSON.parse((await run(process.execPath, [
       cli, "heartbeat", "--config", configPath,

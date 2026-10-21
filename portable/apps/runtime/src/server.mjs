@@ -566,7 +566,9 @@ export async function startLocalRuntime(options = {}) {
     }
     try {
       const device = await deviceRegistry.authenticate({ token });
-      const body = await readJsonBody(ctx.request, { maxBytes: 1024 * 1024 });
+      // Screenshots arrive as base64, so the result body needs more room than
+      // a plain file listing.
+      const body = await readJsonBody(ctx.request, { maxBytes: 8 * 1024 * 1024 });
       const accepted = deviceChannel.complete({
         deviceId: device.id,
         commandId: ctx.params.id,
@@ -605,14 +607,18 @@ export async function startLocalRuntime(options = {}) {
       }
       const body = await readJsonBody(ctx.request, { maxBytes: 1024 * 1024 });
       const type = body.type;
-      if (!["files.list", "files.read", "files.write", "process.run"].includes(type)) {
+      if (!["files.list", "files.read", "files.write", "process.run", "screen.capture"].includes(type)) {
         await record("denied", `不支持的命令类型：${type}`);
         json(ctx.response, 400, { error: "不支持的命令类型" });
         return true;
       }
       const payload = {};
       let ttlMs;
-      if (type === "process.run") {
+      if (type === "screen.capture") {
+        // A full-screen PNG can take a moment on a busy desktop, so the
+        // command has to stay in the queue longer than the default.
+        ttlMs = 30_000;
+      } else if (type === "process.run") {
         const command = body.command;
         if (typeof command !== "string" || command.trim() === "" || command.length > 4096
           || /[\r\n\0]/u.test(command)) {
@@ -680,7 +686,7 @@ export async function startLocalRuntime(options = {}) {
         ...(ttlMs ? { ttlMs } : {}),
       });
       const result = await wait;
-      await record("ok", `${type} ${payload.command ?? payload.path}`);
+      await record("ok", `${type}${payload.command ?? payload.path ? ` ${payload.command ?? payload.path}` : ""}`);
       json(ctx.response, 200, { ok: true, result });
     } catch (error) {
       const status = error.code === "TIMEOUT" ? 504 : error.code === "BUSY" ? 429 : error.status || 400;

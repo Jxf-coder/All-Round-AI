@@ -1564,7 +1564,12 @@ function deviceCard(device) {
 async function runDeviceCommand(device, type) {
   if (!deviceProbe) return;
   let payload;
-  if (type === "process.run") {
+  if (type === "screen.capture") {
+    if (!window.confirm(`将截取「${device.name}」的整个屏幕并回传图片。继续？`)) {
+      return;
+    }
+    payload = { type };
+  } else if (type === "process.run") {
     const program = deviceProbe.program.trim();
     if (!program) {
       deviceProbe = { ...deviceProbe, error: "请先填写要运行的程序绝对路径。", result: null };
@@ -1668,13 +1673,15 @@ function deviceProbeBlock(device) {
   const read = actionButton("读取文件", () => void runDeviceCommand(device, "files.read"));
   const write = actionButton("写入文件", () => void runDeviceCommand(device, "files.write"));
   const run = actionButton("运行程序", () => void runDeviceCommand(device, "process.run"));
+  const screen = actionButton("截屏", () => void runDeviceCommand(device, "screen.capture"));
   if (deviceProbe.busy) {
     list.disabled = true;
     read.disabled = true;
     write.disabled = true;
     run.disabled = true;
+    screen.disabled = true;
   }
-  actions.append(list, read, write, run);
+  actions.append(list, read, write, run, screen);
   block.append(actions);
 
   block.append(element(
@@ -1682,7 +1689,7 @@ function deviceProbeBlock(device) {
     "panel-note",
     "只读写配对时 --root 指定的目录；越界路径、二进制与超过 256 KB 的文件会被设备拒绝。",
   ));
-  if (deviceProbe.busy) block.append(element("p", "panel-note", "已发给设备，等待响应（最多 20 秒）…"));
+  if (deviceProbe.busy) block.append(element("p", "panel-note", "已发给设备，等待响应…"));
   if (deviceProbe.error) block.append(element("p", "device-error", deviceProbe.error));
 
   const result = deviceProbe.result;
@@ -1735,6 +1742,19 @@ function deviceProbeBlock(device) {
       const pre = element("pre", "device-file-text error");
       pre.textContent = value.stderr;
       block.append(pre);
+    }
+  } else if (result?.type === "screen.capture") {
+    const value = result.value ?? {};
+    block.append(element(
+      "p",
+      "device-meta",
+      `${value.width ?? "?"}×${value.height ?? "?"} · ${value.bytes ?? 0} 字节`,
+    ));
+    if (typeof value.data === "string" && value.data !== "") {
+      const image = element("img", "device-screen");
+      image.alt = "设备屏幕截图";
+      image.src = `data:image/png;base64,${value.data}`;
+      block.append(image);
     }
   }
   return block;

@@ -96,11 +96,12 @@ function normalizeRoots(value) {
   return normalizeAbsoluteList(value, "允许访问的目录");
 }
 
-export async function saveAgentConfig({ filePath, serverUrl, device, token, roots = [], allow = [] }) {
+export async function saveAgentConfig({ filePath, serverUrl, device, token, roots = [], allow = [], screen = false }) {
   if (!path.isAbsolute(filePath)) throw new TypeError("配置文件必须是绝对路径");
   if (typeof token !== "string" || token.length < MIN_TOKEN_LENGTH) {
     throw new Error("设备令牌无效");
   }
+  if (typeof screen !== "boolean") throw new TypeError("屏幕开关必须是布尔值");
   await writeJsonFile(filePath, {
     schema: 1,
     serverUrl: normalizeServerUrl(serverUrl),
@@ -110,6 +111,7 @@ export async function saveAgentConfig({ filePath, serverUrl, device, token, root
     pairedAt: device.pairedAt,
     roots: normalizeAbsoluteList(roots, "允许访问的目录"),
     allow: normalizeAbsoluteList(allow, "允许运行的程序"),
+    screen,
     token,
   });
   return { filePath, deviceId: device.id, name: device.name };
@@ -132,6 +134,9 @@ export async function loadAgentConfig(filePath) {
   if (typeof parsed.deviceId !== "string" || typeof parsed.name !== "string") {
     throw new Error("设备配置缺少设备信息，请重新配对");
   }
+  if (parsed.screen !== undefined && typeof parsed.screen !== "boolean") {
+    throw new Error("设备配置里的屏幕开关无效，请重新配对");
+  }
   let roots;
   let allow;
   try {
@@ -149,6 +154,7 @@ export async function loadAgentConfig(filePath) {
     pairedAt: typeof parsed.pairedAt === "string" ? parsed.pairedAt : null,
     roots,
     allow,
+    screen: parsed.screen === true,
     token: parsed.token,
   };
 }

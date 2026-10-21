@@ -142,6 +142,26 @@ test("process commands only run allow-listed programs inside the roots", async (
   }
 });
 
+test("screen capture needs an explicit opt-in from pairing", async () => {
+  await assert.rejects(
+    executeCommand({ config: configWith([]), command: { type: "screen.capture", payload: {} } }),
+    /没有开启屏幕能力/u,
+  );
+
+  const fake = { format: "png", bytes: 3, width: 1, height: 1, data: "AAA" };
+  let captured = 0;
+  const result = await executeCommand({
+    config: { ...configWith([]), screen: true },
+    command: { type: "screen.capture" },
+    captureImpl: async () => {
+      captured += 1;
+      return fake;
+    },
+  });
+  assert.equal(captured, 1);
+  assert.deepEqual(result, fake);
+});
+
 test("one poll executes the command and posts its result back", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "allround-desk-poll-"));
   try {
