@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { startLocalRuntime } from "../src/server.mjs";
 import { parseMidi, writeMidi } from "../src/midi.mjs";
+import { buildMusicXml } from "../src/musicxml.mjs";
 
 async function boot(options = {}) {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-automation-api-"));
@@ -71,11 +72,11 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 13);
+    assert.equal(body.pipelines.length, 14);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
         "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "midi-breath",
-        "lyrics-timeline", "midi-musicxml", "publish-pack"]);
+        "lyrics-timeline", "midi-musicxml", "musicxml-midi", "publish-pack"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -1016,6 +1017,63 @@ test("the MusicXML pipeline exports the melody and serves the score", async () =
     );
     assert.equal(download.status, 200);
     assert.equal(download.headers.get("content-type"), "application/vnd.recordare.musicxml+xml");
+  } finally {
+    await app.close();
+  }
+});
+
+test("the MusicXML import pipeline converts a score back to MIDI", async () => {
+  const app = await boot();
+  try {
+    const sourceDir = path.join(app.root, "musicxml-import");
+    await mkdir(sourceDir, { recursive: true });
+    const source = path.join(sourceDir, "score.musicxml");
+    const { xml } = buildMusicXml({
+      notes: [
+        { tickStart: 0, tickEnd: 480, pitch: 60, lyric: "只" },
+        { tickStart: 480, tickEnd: 960, pitch: 62, lyric: "剩" },
+      ],
+      meta: { ticksPerBeat: 480, tempoBpm: 120, timeSignature: { numerator: 4, denominator: 4 } },
+      title: "回导旋律",
+    });
+    await writeFile(source, xml, "utf8");
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [sourceDir] }),
+    });
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "musicxml-midi",
+        projectId: app.projectId,
+        params: { convert: { source } },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { run } = await response.json();
+    assert.equal(run.status, "waiting_manual");
+    assert.deepEqual(run.steps.convert.artifacts.map((entry) => entry.slot), ["midi", "report"]);
+
+    const report = JSON.parse((await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/report`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json()).text);
+    assert.equal(report.notes, 2);
+    assert.equal(report.ties_merged, 0);
+    assert.equal(report.title, "回导旋律");
+
+    const download = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/midi/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get("content-type"), "audio/midi");
+    const midi = parseMidi(Buffer.from(await download.arrayBuffer()));
+    assert.deepEqual(midi.notes.map((note) => note.pitch), [60, 62]);
+    assert.deepEqual(midi.notes.map((note) => note.lyric), ["只", "剩"]);
   } finally {
     await app.close();
   }

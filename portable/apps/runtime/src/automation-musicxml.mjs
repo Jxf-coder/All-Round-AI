@@ -1,11 +1,12 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { MUSICXML_LIMITS, buildMusicXml } from "./musicxml.mjs";
-import { MIDI_LIMITS, parseMidi } from "./midi.mjs";
+import { MUSICXML_IMPORT_LIMITS, MUSICXML_LIMITS, buildMusicXml, parseMusicXml } from "./musicxml.mjs";
+import { MIDI_LIMITS, parseMidi, writeMidi } from "./midi.mjs";
 import { resolveAllowedFile } from "./sources.mjs";
 
 const MIDI_EXTENSIONS = new Set([".mid", ".midi"]);
+const XML_EXTENSIONS = new Set([".musicxml", ".xml"]);
 
 function safeRunName(runId) {
   return String(runId).replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 80) || "run";
@@ -74,6 +75,61 @@ export function createMusicXmlHandler({ sourceStore, artifactsDir } = {}) {
           `源文件：${path.basename(source)}，${report.notes} 个音符`,
           `${report.measures} 个小节，${report.time_signature} 拍，${report.tempo_bpm} BPM，调号 ${report.fifths}`,
           report.tied_segments ? `${report.tied_segments} 个跨小节音符已用延音线连接` : "没有跨小节音符",
+        ],
+      };
+    },
+
+    "musicxml.to-midi": async ({ run, params }) => {
+      const roots = (await sourceStore.list()).roots;
+      const source = await resolveAllowedFile(params.source, roots);
+      if (!XML_EXTENSIONS.has(path.extname(source).toLowerCase())) {
+        throw new Error("源文件必须是 .musicxml 或 .xml");
+      }
+      const info = await stat(source);
+      if (info.size === 0) throw new Error("MusicXML 文件为空");
+      if (info.size > MUSICXML_IMPORT_LIMITS.bytes) throw new Error("MusicXML 文件超过 2 MB");
+
+      const parsed = parseMusicXml(await readFile(source, "utf8"));
+      const tempoUs = Math.round(60_000_000 / parsed.meta.tempoBpm);
+      const seconds = (tick) => (tick * 60) / parsed.meta.tempoBpm / parsed.meta.ticksPerBeat;
+      const midi = writeMidi({
+        notes: parsed.notes.map((note) => ({
+          t0: seconds(note.tickStart),
+          t1: seconds(note.tickEnd),
+          pitch: note.pitch,
+          lyric: note.lyric,
+        })),
+        meta: {
+          ticksPerBeat: parsed.meta.ticksPerBeat,
+          tempoUs,
+          timeSignature: parsed.meta.timeSignature,
+        },
+      });
+
+      const directory = path.join(artifactsDir, safeRunName(run.id));
+      await mkdir(directory, { recursive: true });
+      const midiFile = path.join(directory, "melody.mid");
+      const reportFile = path.join(directory, "report.json");
+      const payload = { ...parsed.report, in: source, out: midiFile };
+      const reportText = `${JSON.stringify(payload, null, 2)}\n`;
+      try {
+        await writeFile(midiFile, midi, { mode: 0o600 });
+        await writeFile(reportFile, reportText, { encoding: "utf8", mode: 0o600 });
+      } catch (error) {
+        await Promise.all([midiFile, reportFile].map((file) => rm(file, { force: true }).catch(() => {})));
+        throw new Error(`写入 MIDI 产物失败：${error.message}`);
+      }
+
+      return {
+        artifacts: [
+          { slot: "midi", label: "旋律 MIDI", path: midiFile, bytes: midi.length },
+          { slot: "report", label: "导入报告（JSON）", path: reportFile, bytes: Buffer.byteLength(reportText, "utf8") },
+        ],
+        logs: [
+          `源文件：${path.basename(source)}，${parsed.report.notes} 个音符`,
+          `${parsed.report.measures} 个小节，${parsed.report.time_signature} 拍，`
+          + `${parsed.report.tempo_bpm} BPM`,
+          parsed.report.ties_merged ? `${parsed.report.ties_merged} 段延音线已合并` : "没有延音线",
         ],
       };
     },

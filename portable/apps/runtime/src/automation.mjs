@@ -714,6 +714,42 @@ export const AUTOMATION_PIPELINES = Object.freeze([
     ],
   },
   {
+    id: "musicxml-midi",
+    name: "旋律导入",
+    desc: "把单声部 MusicXML 转回带词 MIDI：解析音高、时值、休止、延音线与歌词，供气口标注或继续编曲。",
+    steps: [
+      {
+        id: "convert",
+        name: "转回 MIDI",
+        runner: "app",
+        desc: "读取白名单内的 MusicXML，合并延音线并写出标准 MIDI；和弦、多声部与装饰音会明确拒绝。",
+        action: "musicxml.to-midi",
+        outputs: [
+          { slot: "midi", label: "旋律 MIDI" },
+          { slot: "report", label: "导入报告（JSON）" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "MusicXML 文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的 .musicxml 或 .xml 单声部文件",
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "试听或导入 MIDI 后结束本次运行。",
+        after: ["convert"],
+        manualHint: "核对音高、歌词与延音线后点击「我做完了」",
+      },
+    ],
+  },
+  {
     id: "publish-pack",
     name: "发布包",
     desc: "把成片的标题、文案与平台检查项整理成发布清单和 JSON；不调用任何平台接口，由人工发布后回填回执。",

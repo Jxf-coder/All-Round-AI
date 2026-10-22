@@ -209,6 +209,16 @@ export const SKILLS = Object.freeze([
     hint: "不需要 FFmpeg；导出的 .musicxml 可直接用 MuseScore 等制谱软件打开。",
   },
   {
+    id: "musicxml-midi",
+    name: "旋律导入",
+    category: "production",
+    icon: "↺",
+    runner: "app",
+    pipelineId: "musicxml-midi",
+    desc: "把单声部 MusicXML 转回带词 MIDI，合并延音线并保留歌词，供气口标注或继续编曲。",
+    hint: "不需要 FFmpeg；和弦、多声部与装饰音会被明确拒绝。",
+  },
+  {
     id: "music-midi",
     name: "音乐 / MIDI",
     category: "production",

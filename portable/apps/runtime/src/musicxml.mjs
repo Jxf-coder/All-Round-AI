@@ -192,3 +192,146 @@ export function buildMusicXml({ notes, meta, title = "旋律", fifths = 0, partN
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// MusicXML → notes. Only the single-part, single-voice subset that the export
+// above produces (plus hand-written melodies in the same shape) is accepted.
+// Chords, grace notes, multiple parts or extra voices are refused instead of
+// being flattened silently.
+// ---------------------------------------------------------------------------
+
+const STEP_SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+export const MUSICXML_IMPORT_LIMITS = Object.freeze({
+  bytes: 2 * 1024 * 1024,
+  notes: 20_000,
+  measures: 2_000,
+});
+
+function unescapeXml(value) {
+  return String(value)
+    .replace(/&lt;/gu, "<")
+    .replace(/&gt;/gu, ">")
+    .replace(/&quot;/gu, "\"")
+    .replace(/&apos;/gu, "'")
+    .replace(/&amp;/gu, "&");
+}
+
+function firstMatch(pattern, text) {
+  const match = pattern.exec(text);
+  return match ? match[1] : null;
+}
+
+export function parseMusicXml(xml) {
+  if (typeof xml !== "string" || !xml.trim()) throw new TypeError("MusicXML 内容不能为空");
+  if (Buffer.byteLength(xml, "utf8") > MUSICXML_IMPORT_LIMITS.bytes) {
+    throw new Error("MusicXML 文件超过 2 MB");
+  }
+  if (!/<score-partwise\b/u.test(xml)) throw new Error("只支持 MusicXML score-partwise");
+  const parts = xml.match(/<part(?=[\s>])[^>]*>/gu) ?? [];
+  if (parts.length === 0) throw new Error("MusicXML 里没有声部");
+  if (parts.length > 1) throw new Error("暂不支持多声部 MusicXML");
+  const partStart = xml.indexOf(parts[0]);
+  const partBody = xml.slice(partStart);
+  const measures = partBody.match(/<measure\b[^>]*>[\s\S]*?<\/measure>/gu) ?? [];
+  if (!measures.length) throw new Error("MusicXML 里没有小节");
+  if (measures.length > MUSICXML_IMPORT_LIMITS.measures) throw new Error("MusicXML 小节过多");
+
+  const title = firstMatch(/<work-title>([\s\S]*?)<\/work-title>/u, xml);
+  let divisions = null;
+  let tempoBpm = 120;
+  let timeSignature = null;
+  let cursor = 0;
+  const notes = [];
+  let mergedTies = 0;
+
+  for (const measure of measures) {
+    const attributes = firstMatch(/<attributes>([\s\S]*?)<\/attributes>/u, measure);
+    if (attributes) {
+      const divisionText = firstMatch(/<divisions>(\d+)<\/divisions>/u, attributes);
+      if (divisionText) {
+        const value = Number(divisionText);
+        if (!Number.isSafeInteger(value) || value < 1 || value > 9_600) throw new Error("MusicXML divisions 无效");
+        divisions = value;
+      }
+      const beats = firstMatch(/<beats>(\d+)<\/beats>/u, attributes);
+      const beatType = firstMatch(/<beat-type>(\d+)<\/beat-type>/u, attributes);
+      if (beats && beatType) timeSignature = { numerator: Number(beats), denominator: Number(beatType) };
+    }
+    const tempo = firstMatch(/<sound\b[^>]*tempo="([\d.]+)"/u, measure)
+      ?? firstMatch(/<per-minute>([\d.]+)<\/per-minute>/u, measure);
+    if (tempo) {
+      const value = Number(tempo);
+      if (Number.isFinite(value) && value > 0 && value <= 600) tempoBpm = value;
+    }
+    if (!divisions) throw new Error("MusicXML 缺少 divisions");
+
+    const blocks = measure.match(/<(note|backup|forward)\b[\s\S]*?<\/\1>/gu) ?? [];
+    for (const block of blocks) {
+      if (block.startsWith("<backup")) {
+        const duration = Number(firstMatch(/<duration>(\d+)<\/duration>/u, block) ?? 0);
+        cursor = Math.max(0, cursor - duration);
+        continue;
+      }
+      if (block.startsWith("<forward")) {
+        const duration = Number(firstMatch(/<duration>(\d+)<\/duration>/u, block) ?? 0);
+        cursor += duration;
+        continue;
+      }
+      if (/<grace\b/u.test(block)) throw new Error("暂不支持装饰音（grace note）");
+      if (/<chord\s*\/>/u.test(block)) throw new Error("暂不支持和弦（chord）");
+      const voice = firstMatch(/<voice>(\d+)<\/voice>/u, block);
+      if (voice && voice !== "1") throw new Error("暂不支持多声部（voice）");
+      const duration = Number(firstMatch(/<duration>(\d+)<\/duration>/u, block) ?? 0);
+      if (!Number.isSafeInteger(duration) || duration <= 0) throw new Error("MusicXML 音符缺少有效时值");
+      if (/<rest\s*\/>/u.test(block)) {
+        cursor += duration;
+        continue;
+      }
+      const step = firstMatch(/<step>([A-G])<\/step>/u, block);
+      const octave = firstMatch(/<octave>(-?\d+)<\/octave>/u, block);
+      if (!step || octave === null) throw new Error("MusicXML 音符缺少音高");
+      const alter = Number(firstMatch(/<alter>(-?\d+)<\/alter>/u, block) ?? 0);
+      const pitch = (Number(octave) + 1) * 12 + STEP_SEMITONES[step] + alter;
+      if (pitch < 0 || pitch > 127) throw new Error("MusicXML 音高超出 MIDI 范围");
+      const lyricBlock = firstMatch(/<lyric\b[^>]*>([\s\S]*?)<\/lyric>/u, block);
+      const lyricText = lyricBlock ? firstMatch(/<text>([\s\S]*?)<\/text>/u, lyricBlock) : null;
+      const lyric = lyricText ? unescapeXml(lyricText).trim() || "-" : "-";
+      const tieStop = /<tie\b[^>]*type="stop"/u.test(block) || /<tied\b[^>]*type="stop"/u.test(block);
+
+      if (tieStop) {
+        const previous = notes[notes.length - 1];
+        if (previous && previous.pitch === pitch && previous.tickEnd === cursor) {
+          previous.tickEnd = cursor + duration;
+          mergedTies += 1;
+          cursor += duration;
+          continue;
+        }
+        throw new Error("MusicXML 延音线无法连接到前一个音符");
+      }
+      notes.push({ tickStart: cursor, tickEnd: cursor + duration, pitch, lyric });
+      cursor += duration;
+      if (notes.length > MUSICXML_IMPORT_LIMITS.notes) throw new Error("MusicXML 音符过多");
+    }
+  }
+
+  if (!notes.length) throw new Error("MusicXML 里没有音符");
+  return {
+    notes,
+    meta: {
+      ticksPerBeat: divisions,
+      tempoBpm,
+      timeSignature: timeSignature ?? { numerator: 4, denominator: 4 },
+    },
+    report: {
+      notes: notes.length,
+      measures: measures.length,
+      divisions,
+      tempo_bpm: Math.round(tempoBpm * 100) / 100,
+      time_signature: `${(timeSignature ?? { numerator: 4, denominator: 4 }).numerator}/`
+        + `${(timeSignature ?? { numerator: 4, denominator: 4 }).denominator}`,
+      ties_merged: mergedTies,
+      title: title ? unescapeXml(title).trim() : "",
+    },
+  };
+}

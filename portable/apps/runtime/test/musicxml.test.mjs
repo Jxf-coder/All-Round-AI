@@ -5,8 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { createMusicXmlHandler } from "../src/automation-musicxml.mjs";
-import { buildMusicXml } from "../src/musicxml.mjs";
-import { writeMidi } from "../src/midi.mjs";
+import { buildMusicXml, parseMusicXml } from "../src/musicxml.mjs";
+import { parseMidi, writeMidi } from "../src/midi.mjs";
 
 const META = {
   ticksPerBeat: 480,
@@ -67,6 +67,82 @@ test("MusicXML falls back to a clean default title and rejects invalid input", (
     /时基/u,
   );
 });
+
+test("MusicXML import round-trips the exported melody and merges ties", () => {
+  const { xml } = buildMusicXml({ notes: NOTES, meta: META, title: "A & B", fifths: 3 });
+  const parsed = parseMusicXml(xml);
+  assert.equal(parsed.notes.length, 3);
+  assert.deepEqual(parsed.notes.map((note) => [note.tickStart, note.tickEnd, note.pitch, note.lyric]), [
+    [0, 960, 60, "只"],
+    [960, 2_880, 62, "剩"],
+    [2_880, 3_360, 64, "下"],
+  ]);
+  assert.equal(parsed.report.ties_merged, 1);
+  assert.equal(parsed.meta.ticksPerBeat, 480);
+  assert.equal(parsed.meta.tempoBpm, 120);
+  assert.deepEqual(parsed.meta.timeSignature, { numerator: 4, denominator: 4 });
+  assert.equal(parsed.report.title, "A & B");
+  assert.equal(parsed.report.measures, 2);
+});
+
+test("MusicXML import refuses structures that would be flattened silently", () => {
+  const { xml } = buildMusicXml({ notes: NOTES, meta: META });
+  const secondPart = xml.replace("</part>", "</part><part id=\"P2\">" + xml.match(/<measure[\s\S]*<\/measure>/u)[0] + "</part>");
+  assert.throws(() => parseMusicXml(secondPart), /多声部/u);
+
+  const chord = xml.replace("<note>", "<note><chord/>");
+  assert.throws(() => parseMusicXml(chord), /和弦/u);
+
+  const grace = xml.replace("<note>", "<note><grace/>");
+  assert.throws(() => parseMusicXml(grace), /装饰音/u);
+
+  const voice = xml.replace("<voice>1</voice>", "<voice>2</voice>");
+  assert.throws(() => parseMusicXml(voice), /多声部/u);
+
+  assert.throws(() => parseMusicXml("<score-partwise><part id=\"P1\"></part></score-partwise>"), /小节/u);
+  assert.throws(() => parseMusicXml("<score-partwise><part-list/></score-partwise>"), /声部/u);
+  assert.throws(() => parseMusicXml(""), /不能为空/u);
+});
+
+test("the handler converts MusicXML back to a MIDI with merged ties", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "allround-musicxml-in-"));
+  const sourceDir = path.join(root, "source");
+  const artifacts = path.join(root, "artifacts");
+  await mkdir(sourceDir, { recursive: true });
+  const { xml } = buildMusicXml({ notes: NOTES, meta: META, title: "导入测试" });
+  await writeFile(path.join(sourceDir, "score.musicxml"), xml, "utf8");
+  await writeFile(path.join(sourceDir, "score.txt"), xml, "utf8");
+  try {
+    const handler = createMusicXmlHandler({
+      sourceStore: { list: async () => ({ roots: [sourceDir] }) },
+      artifactsDir: artifacts,
+    });
+    const result = await handler["musicxml.to-midi"]({
+      run: { id: "run_import" },
+      params: { source: path.join(sourceDir, "score.musicxml") },
+    });
+    assert.deepEqual(result.artifacts.map((entry) => entry.slot), ["midi", "report"]);
+    const midi = parseMidi(await readFile(result.artifacts[0].path));
+    assert.deepEqual(midi.notes.map((note) => note.pitch), [60, 62, 64]);
+    assert.deepEqual(midi.notes.map((note) => note.lyric), ["只", "剩", "下"]);
+    assert.equal(Math.round(midi.notes[1].t1 * 1000) / 1000, 3);
+    const report = JSON.parse(await readFile(result.artifacts[1].path, "utf8"));
+    assert.equal(report.notes, 3);
+    assert.equal(report.ties_merged, 1);
+    assert.equal(report.title, "导入测试");
+
+    await assert.rejects(
+      handler["musicxml.to-midi"]({
+        run: { id: "run_bad" },
+        params: { source: path.join(sourceDir, "score.txt") },
+      }),
+      /\.musicxml/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 
 test("the handler writes a MusicXML score and a report inside the artifacts directory", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "allround-musicxml-"));
