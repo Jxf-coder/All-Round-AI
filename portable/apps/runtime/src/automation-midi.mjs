@@ -36,8 +36,16 @@ export function createMidiBreathHandler({ sourceStore, artifactsDir } = {}) {
       const buffer = await readFile(source);
 
       const lyrics = parseLyricLines(params.lyrics ?? "");
-      const transpose = Number(params.transpose ?? 0);
-      const { buffer: output, report } = markBreaths({ buffer, lyrics, transpose });
+      const transpose = params.manualTranspose === true ? Number(params.transpose ?? 0) : undefined;
+      const { buffer: output, report } = markBreaths({
+        buffer,
+        lyrics,
+        transpose,
+        key: params.key,
+        sourceKey: params.sourceKey,
+        singer: params.singer,
+        fitRange: params.fitRange,
+      });
 
       const directory = path.join(artifactsDir, safeRunName(run.id));
       await mkdir(directory, { recursive: true });
@@ -73,7 +81,11 @@ export function createMidiBreathHandler({ sourceStore, artifactsDir } = {}) {
           + `最长乐句 ${before.max_phrase} → ${after.max_phrase} 秒`,
           `句尾 ${report.lyric_line_cuts}、长音 ${report.long_note_cuts}、`
           + `兜底 ${report.phrase_cap_cuts}、保字短口 ${report.short_gaps_protecting_note}`,
-          `移调 ${report.transpose >= 0 ? "+" : ""}${report.transpose} 半音`,
+          `移调 ${report.transpose >= 0 ? "+" : ""}${report.transpose} 半音`
+          + (report.vocal_fit
+            ? `（目标调 ${report.key ?? "原调"}，歌手 ${report.vocal_fit.singer}，`
+              + `八度修正 ${report.vocal_fit.octave_fit >= 0 ? "+" : ""}${report.vocal_fit.octave_fit}）`
+            : ""),
         ],
       };
     },

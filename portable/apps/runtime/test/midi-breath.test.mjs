@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseMidi, writeMidi } from "../src/midi.mjs";
-import { BREATH_RULES, markBreaths, parseLyricLines } from "../src/midi-breath.mjs";
+import {
+  BREATH_RULES,
+  VOCAL_PROFILES,
+  fitVocalOctave,
+  markBreaths,
+  parseKeyToPc,
+  parseLyricLines,
+} from "../src/midi-breath.mjs";
 
 const META = {
   ticksPerBeat: 480,
@@ -104,6 +111,71 @@ test("transpose shifts every pitch and clamps to the MIDI range", () => {
   });
   assert.equal(parseMidi(low.buffer).notes[0].pitch, 0);
   assert.throws(() => markBreaths({ buffer: build(notes), transpose: 25 }), /移调/u);
+});
+
+test("key names resolve to pitch classes including flats and unicode accidentals", () => {
+  assert.equal(parseKeyToPc("C"), 0);
+  assert.equal(parseKeyToPc("Eb major"), 3);
+  assert.equal(parseKeyToPc("E♭"), 3);
+  assert.equal(parseKeyToPc("F# minor"), 6);
+  assert.equal(parseKeyToPc("B"), 11);
+  assert.equal(parseKeyToPc("H"), null);
+  assert.equal(parseKeyToPc(""), null);
+  assert.equal(parseKeyToPc(null), null);
+});
+
+test("the octave search keeps the key and respects the singer's window", () => {
+  assert.equal(VOCAL_PROFILES.female.targetMedian, 67);
+  assert.deepEqual(fitVocalOctave([60, 62, 64, 66], 3, "female"), {
+    semitones: 3,
+    fit: {
+      median_before: 64,
+      median_after: 67,
+      range_before: [60, 66],
+      range_after: [63, 69],
+      key_pc_delta: 3,
+      octave_fit: 0,
+      singer: "female",
+    },
+  });
+  const male = fitVocalOctave([60, 62, 64, 66], 3, "male");
+  assert.equal(male.semitones, -9);
+  assert.equal(male.fit.octave_fit, -12);
+  assert.deepEqual(male.fit.range_after, [51, 57]);
+  const empty = fitVocalOctave([], 9, "female");
+  assert.equal(empty.semitones, -3);
+  assert.equal(empty.fit.reason, "no_pitches");
+});
+
+test("key matching transposes the output and a manual transpose wins", () => {
+  const notes = syllables(8, 0.5);
+  const eb = markBreaths({ buffer: build(notes), key: "Eb major", singer: "female" });
+  assert.equal(eb.report.transpose, 3);
+  assert.equal(eb.report.key, "Eb major");
+  assert.equal(eb.report.source_key, "C");
+  assert.equal(eb.report.vocal_fit.singer, "female");
+  assert.deepEqual(
+    parseMidi(eb.buffer).notes.map((note) => note.pitch),
+    [63, 64, 65, 66, 67, 68, 69, 63],
+  );
+
+  const manual = markBreaths({ buffer: build(notes), key: "Eb major", transpose: 5 });
+  assert.equal(manual.report.transpose, 5);
+  assert.equal(manual.report.vocal_fit, null);
+
+  const noFit = markBreaths({ buffer: build(notes), key: "Eb major", fitRange: false });
+  assert.equal(noFit.report.transpose, 3);
+  assert.equal(noFit.report.vocal_fit, null);
+
+  const unusual = markBreaths({ buffer: build(notes), key: "B major", sourceKey: "C", fitRange: false });
+  assert.equal(unusual.report.transpose, -1);
+});
+
+test("an unknown singer falls back to the default window without failing", () => {
+  const notes = syllables(4, 0.5);
+  const result = markBreaths({ buffer: build(notes), key: "Eb major", singer: "不存在" });
+  assert.equal(result.report.vocal_fit.singer, "不存在");
+  assert.equal(result.report.transpose, 3);
 });
 
 test("rule overrides are validated and an empty MIDI fails loudly", () => {

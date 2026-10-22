@@ -810,7 +810,7 @@ test("the MIDI pipeline marks breaths, transposes and serves the file as audio/m
       body: JSON.stringify({
         pipelineId: "midi-breath",
         projectId: app.projectId,
-        params: { mark: { source, lyrics: "只剩\n下钢\n琴陪\n我唱", transpose: 2 } },
+        params: { mark: { source, lyrics: "只剩\n下钢\n琴陪\n我唱", manualTranspose: true, transpose: 2 } },
       }),
     });
     assert.equal(response.status, 201);
@@ -842,6 +842,43 @@ test("the MIDI pipeline marks breaths, transposes and serves the file as audio/m
       ["只", "剩", "下", "钢", "琴", "陪", "我", "唱"]);
     // A line-end breath was carved, so the syllables are no longer glued.
     assert.ok(parsed.notes[1].t1 < parsed.notes[2].t0);
+
+    const keyed = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "midi-breath",
+        projectId: app.projectId,
+        params: {
+          mark: {
+            source,
+            lyrics: "只剩\n下钢\n琴陪\n我唱",
+            key: "Eb major",
+            sourceKey: "C",
+            singer: "male",
+            fitRange: true,
+            manualTranspose: false,
+          },
+        },
+      }),
+    });
+    assert.equal(keyed.status, 201);
+    const keyedRun = (await keyed.json()).run;
+    assert.equal(keyedRun.status, "waiting_manual");
+    const keyedReport = JSON.parse((await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${keyedRun.id}/artifacts/report`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json()).text);
+    // Eb major is +3 from C, but a male window pulls the melody down an octave.
+    assert.equal(keyedReport.transpose, -9);
+    assert.equal(keyedReport.key, "Eb major");
+    assert.equal(keyedReport.vocal_fit.octave_fit, -12);
+    assert.equal(keyedReport.vocal_fit.singer, "male");
+    const keyedMidi = parseMidi(Buffer.from(await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${keyedRun.id}/artifacts/midi/download`,
+      { headers: { cookie: app.admin.cookie } },
+    )).arrayBuffer()));
+    assert.deepEqual(keyedMidi.notes.map((note) => note.pitch), [51, 52, 53, 54, 55, 56, 57, 58]);
   } finally {
     await app.close();
   }

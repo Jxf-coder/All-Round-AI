@@ -29,6 +29,93 @@ export const MAX_TRANSPOSE = 24;
 export const MAX_LYRIC_LINES = 500;
 const CJK = /[\u4e00-\u9fff]/u;
 
+// Pitch classes follow the reference spelling table so `Eb major`, `E♭` and
+// `D# minor` all resolve to the same key.
+const PITCH_CLASSES = Object.freeze({
+  C: 0, "B#": 0, "C#": 1, DB: 1, D: 2, "D#": 3, EB: 3, E: 4, FB: 4,
+  F: 5, "E#": 5, "F#": 6, GB: 6, G: 7, "G#": 8, AB: 8, A: 9, "A#": 10,
+  BB: 10, B: 11, CB: 11,
+});
+
+// Singer comfort windows in MIDI notes: the median should land in the middle
+// window, and the whole melody should stay inside the outer one. Values come
+// from the reference project's measured vocal ranges.
+export const VOCAL_PROFILES = Object.freeze({
+  default: { targetMedian: 60, medianMin: 57, medianMax: 69, noteMin: 50, noteMax: 81 },
+  怪枝: { targetMedian: 60, medianMin: 57, medianMax: 69, noteMin: 50, noteMax: 81 },
+  挚彬: { targetMedian: 55, medianMin: 50, medianMax: 62, noteMin: 45, noteMax: 74 },
+  何畅: { targetMedian: 57, medianMin: 52, medianMax: 64, noteMin: 48, noteMax: 76 },
+  艾登: { targetMedian: 57, medianMin: 52, medianMax: 64, noteMin: 48, noteMax: 76 },
+  文社长: { targetMedian: 57, medianMin: 52, medianMax: 64, noteMin: 48, noteMax: 76 },
+  星尘: { targetMedian: 67, medianMin: 60, medianMax: 74, noteMin: 55, noteMax: 84 },
+  赤羽: { targetMedian: 67, medianMin: 60, medianMax: 74, noteMin: 55, noteMax: 84 },
+  海伊: { targetMedian: 67, medianMin: 60, medianMax: 74, noteMin: 55, noteMax: 84 },
+  male: { targetMedian: 55, medianMin: 50, medianMax: 62, noteMin: 45, noteMax: 74 },
+  female: { targetMedian: 67, medianMin: 60, medianMax: 74, noteMin: 55, noteMax: 84 },
+});
+
+export function parseKeyToPc(key) {
+  if (typeof key !== "string" || !key.trim()) return null;
+  const value = key.replace(/♭/gu, "b").replace(/♯/gu, "#").trim();
+  const match = /^([A-Ga-g])([#b]?)/u.exec(value);
+  if (!match) return null;
+  const pitchClass = PITCH_CLASSES[(match[1] + match[2]).toUpperCase()];
+  return pitchClass === undefined ? null : pitchClass;
+}
+
+function compareScores(left, right) {
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return 0;
+}
+
+// Choose the octave that best fits the singer while keeping the key's pitch
+// classes. Only ±12 steps are considered, so the melody never changes key.
+export function fitVocalOctave(pitches, keyPcDelta, singer = "") {
+  const profile = VOCAL_PROFILES[String(singer ?? "").trim()] ?? VOCAL_PROFILES.default;
+  const delta = ((keyPcDelta % 12) + 12) % 12;
+  if (!Array.isArray(pitches) || !pitches.length) {
+    return { semitones: delta > 6 ? delta - 12 : delta, fit: { reason: "no_pitches" } };
+  }
+  const sorted = [...pitches].sort((left, right) => left - right);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const low = sorted[0];
+  const high = sorted[sorted.length - 1];
+  let best = delta;
+  let bestScore = null;
+  for (let octave = -4; octave <= 4; octave += 1) {
+    const candidate = delta + 12 * octave;
+    const candidateMedian = median + candidate;
+    const candidateLow = low + candidate;
+    const candidateHigh = high + candidate;
+    const score = [
+      profile.medianMin <= candidateMedian && candidateMedian <= profile.medianMax ? 0 : 1,
+      candidateLow >= profile.noteMin && candidateHigh <= profile.noteMax ? 0 : 1,
+      Math.max(0, candidateHigh - profile.noteMax),
+      Math.abs(candidateMedian - profile.targetMedian),
+      Math.abs(candidate),
+      candidate,
+    ];
+    if (!bestScore || compareScores(score, bestScore) < 0) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  return {
+    semitones: best,
+    fit: {
+      median_before: median,
+      median_after: median + best,
+      range_before: [low, high],
+      range_after: [low + best, high + best],
+      key_pc_delta: delta,
+      octave_fit: best - delta,
+      singer: String(singer ?? "").trim() || "default",
+    },
+  };
+}
+
 export function parseLyricLines(text) {
   if (typeof text !== "string" || !text.trim()) return [];
   const lines = [];
@@ -252,15 +339,39 @@ function mergeRules(overrides) {
   return merged;
 }
 
-export function markBreaths({ buffer, lyrics = [], transpose = 0, rules } = {}) {
+export function markBreaths({
+  buffer,
+  lyrics = [],
+  transpose,
+  key,
+  sourceKey = "C",
+  singer = "",
+  fitRange = true,
+  rules,
+} = {}) {
   const active = mergeRules(rules);
-  const semitones = Number(transpose ?? 0);
-  if (!Number.isInteger(semitones) || Math.abs(semitones) > MAX_TRANSPOSE) {
+  const manual = transpose === undefined || transpose === null || transpose === ""
+    ? null
+    : Number(transpose);
+  if (manual !== null && (!Number.isInteger(manual) || Math.abs(manual) > MAX_TRANSPOSE)) {
     throw new TypeError(`移调必须是 -${MAX_TRANSPOSE} 到 ${MAX_TRANSPOSE} 之间的整数`);
   }
   const parsed = parseMidi(buffer);
   const notes = parsed.notes.map((note) => ({ ...note }));
   if (!notes.length) throw new Error("MIDI 里没有音符");
+
+  let semitones = manual ?? 0;
+  let vocalFit = null;
+  if (manual === null) {
+    const fromPc = parseKeyToPc(sourceKey) ?? 0;
+    const toPc = parseKeyToPc(key);
+    const delta = toPc === null ? 0 : (((toPc - fromPc) % 12) + 12) % 12;
+    if (fitRange) {
+      ({ semitones, fit: vocalFit } = fitVocalOctave(notes.map((note) => note.pitch), delta, singer));
+    } else {
+      semitones = delta > 6 ? delta - 12 : delta;
+    }
+  }
 
   const rest = active.extraRestSec;
   const minNote = active.minNoteAfterCutSec;
@@ -338,6 +449,9 @@ export function markBreaths({ buffer, lyrics = [], transpose = 0, rules } = {}) 
       after,
       breaths_per_min: duration ? Math.round((after.n_gap / duration) * 60 * 10) / 10 : 0,
       transpose: semitones,
+      key: typeof key === "string" && key.trim() ? key.trim() : null,
+      source_key: sourceKey || "C",
+      vocal_fit: vocalFit,
     },
   };
 }
