@@ -59,9 +59,11 @@ test("the catalog lists implemented capabilities and keeps later phases visible"
     assert.equal(skills.get("video-burn").enabled, true);
     assert.equal(skills.get("video-burn").available, false);
     assert.match(skills.get("video-burn").reason, /FFmpeg/);
+    assert.equal(skills.get("media-render").enabled, true);
+    assert.equal(skills.get("media-render").available, false);
     assert.equal(skills.get("publish-pack").enabled, true);
     assert.equal(skills.get("publish-pack").available, true);
-    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 20, available: 12, comingSoon: 4 });
+    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 21, available: 12, comingSoon: 3 });
   } finally {
     await fixture.close();
   }

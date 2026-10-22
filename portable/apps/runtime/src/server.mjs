@@ -32,6 +32,7 @@ import { createPublishPackHandler } from "./automation-publish.mjs";
 import { createMidiBreathHandler } from "./automation-midi.mjs";
 import { createLyricsTimelineHandler } from "./automation-lyrics.mjs";
 import { createMusicXmlHandler } from "./automation-musicxml.mjs";
+import { createRenderHandler } from "./automation-render.mjs";
 import { createPublishReceiptStore } from "./publish-receipts.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
@@ -392,6 +393,12 @@ export async function startLocalRuntime(options = {}) {
         runner: options.mediaRun,
       }),
       ...createSubtitleBurnHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+        mediaProbe,
+        runner: options.mediaRun,
+      }),
+      ...createRenderHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
         mediaProbe,

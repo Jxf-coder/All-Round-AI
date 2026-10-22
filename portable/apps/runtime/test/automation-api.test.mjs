@@ -72,11 +72,12 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 15);
+    assert.equal(body.pipelines.length, 16);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
         "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "video-burn",
-        "midi-breath", "lyrics-timeline", "midi-musicxml", "musicxml-midi", "publish-pack"]);
+        "video-render", "midi-breath", "lyrics-timeline", "midi-musicxml", "musicxml-midi",
+        "publish-pack"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -862,6 +863,111 @@ test("the burn pipeline hardcodes an SRT and serves the result", async () => {
     const failed = (await bad.json()).run;
     assert.equal(failed.status, "failed");
     assert.match(failed.error, /缺少时间码/u);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the render pipeline joins clips and serves the report", async () => {
+  const encodes = [];
+  const app = await boot({
+    mediaProbe: async () => ({
+      ffmpeg: { available: true, path: "ffmpeg", version: "test", reason: "" },
+      ffprobe: { available: true, path: "ffprobe", version: "test", reason: "" },
+      checkedAt: "2026-10-21T00:00:00.000Z",
+    }),
+    mediaRun: async (command, args, options) => {
+      if (args.includes("-print_format")) {
+        const file = args[args.length - 1];
+        const isBgm = file.endsWith(".mp3");
+        const isSecond = file.endsWith("b.mp4");
+        return {
+          stdout: JSON.stringify({
+            format: { format_name: "mov,mp4", duration: isBgm ? "30" : isSecond ? "3" : "4", size: "4096" },
+            streams: isBgm
+              ? [{ codec_type: "audio", codec_name: "mp3" }]
+              : [
+                { codec_type: "video", codec_name: "h264", width: 1280, height: 720 },
+                ...(isSecond ? [] : [{ codec_type: "audio", codec_name: "aac" }]),
+              ],
+          }),
+          stderr: "",
+        };
+      }
+      encodes.push({ command, args, options });
+      await writeFile(args[args.length - 1], Buffer.alloc(6144, 6));
+      return { stdout: "", stderr: "" };
+    },
+  });
+  try {
+    const mediaDir = path.join(app.root, "render-source");
+    await mkdir(mediaDir, { recursive: true });
+    const first = path.join(mediaDir, "a.mp4");
+    const second = path.join(mediaDir, "b.mp4");
+    const bgm = path.join(mediaDir, "bgm.mp3");
+    for (const file of [first, second, bgm]) await writeFile(file, Buffer.alloc(2048, 1));
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "video-render",
+        projectId: app.projectId,
+        params: {
+          render: {
+            clips: `${first}\n${second}`,
+            aspect: "vertical",
+            transition: "crossfade",
+            bgm,
+            bgmVolume: 30,
+          },
+        },
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 201, text);
+    const { run } = JSON.parse(text);
+    assert.equal(run.status, "waiting_manual");
+    assert.deepEqual(run.steps.render.artifacts.map((entry) => entry.slot), ["video", "report"]);
+    assert.equal(run.steps.render.artifacts[0].label, "成片（MP4 / H.264）");
+
+    const filter = encodes.at(-1).args[encodes.at(-1).args.indexOf("-filter_complex") + 1];
+    assert.match(filter, /xfade=transition=fade:duration=0\.6:offset=3\.400/u);
+    assert.match(filter, /volume=0\.30\[bgm\]/u);
+    assert.match(filter, /amix=inputs=2:duration=first/u);
+
+    const video = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/video/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(video.status, 200);
+    assert.equal(video.headers.get("content-type"), "video/mp4");
+    assert.equal((await video.arrayBuffer()).byteLength, 6144);
+
+    const report = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/report`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(report.text, /"seconds": 6\.4/u);
+    assert.match(report.text, /"aspect": "vertical"/u);
+
+    const bad = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "video-render",
+        projectId: app.projectId,
+        params: { render: { clips: first } },
+      }),
+    });
+    const failed = (await bad.json()).run;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /至少要两个片段/u);
   } finally {
     await app.close();
   }

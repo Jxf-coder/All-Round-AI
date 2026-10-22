@@ -165,9 +165,10 @@ export const SKILLS = Object.freeze([
     category: "production",
     icon: "▶",
     runner: "app",
-    comingSoon: true,
-    desc: "把脚本、素材与配音合成可验收的短视频。",
-    hint: "随阶段 4D 的影音产线一起开放。",
+    pipelineId: "video-render",
+    requiresMedia: "ffmpeg",
+    desc: "把多个片段按顺序合成一条成片：统一画布、可选淡入淡出转场与背景音乐，并留一份合成报告。",
+    hint: "需要 FFmpeg/ffprobe；片段会统一补边到目标画布，缺音轨的片段自动补静音。",
   },
   {
     id: "publish-pack",
