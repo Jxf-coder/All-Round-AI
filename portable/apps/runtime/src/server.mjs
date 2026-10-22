@@ -33,6 +33,7 @@ import { createMidiBreathHandler } from "./automation-midi.mjs";
 import { createLyricsTimelineHandler } from "./automation-lyrics.mjs";
 import { createMusicXmlHandler } from "./automation-musicxml.mjs";
 import { createRenderHandler } from "./automation-render.mjs";
+import { createAsrHandler, createAsrProbe } from "./asr.mjs";
 import { createPublishReceiptStore } from "./publish-receipts.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
@@ -334,6 +335,11 @@ export async function startLocalRuntime(options = {}) {
   // FFmpeg is external: probing only reports whether it is usable, so a missing
   // install disables rendering while the inventory pipeline keeps working.
   const mediaProbe = options.mediaProbe ?? createMediaToolProbe();
+  const asrProbe = options.asrProbe ?? createAsrProbe({
+    env,
+    pythonPath: options.pythonPath,
+    modelPath: options.whisperModel,
+  });
   // AI-backed steps use whichever engine the installation already selected, so
   // a local Ollama install works without a second model configuration.
   const automationChat = options.automationChat ?? (async ({ messages }) => {
@@ -403,6 +409,16 @@ export async function startLocalRuntime(options = {}) {
         artifactsDir: automationArtifacts,
         mediaProbe,
         runner: options.mediaRun,
+      }),
+      ...createAsrHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+        mediaProbe,
+        runner: options.mediaRun,
+        pythonRunner: options.pythonRun,
+        pythonPath: options.pythonPath,
+        modelPath: options.whisperModel,
+        env,
       }),
       ...createPublishPackHandler({
         sourceStore,
@@ -899,8 +915,8 @@ export async function startLocalRuntime(options = {}) {
   // app skills are ready, desk skills need a paired agent that advertised the
   // capability, and later-phase entries say they are not switchable yet.
   async function skillList() {
-    const [devices, media] = await Promise.all([deviceRegistry.list(), mediaProbe()]);
-    return skillsStore.list(devices, { media });
+    const [devices, media, asr] = await Promise.all([deviceRegistry.list(), mediaProbe(), asrProbe()]);
+    return skillsStore.list(devices, { media, asr });
   }
 
   // A disabled switch refuses with a stable message instead of silently doing

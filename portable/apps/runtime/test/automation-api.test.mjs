@@ -72,12 +72,12 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 16);
+    assert.equal(body.pipelines.length, 17);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
         "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "video-burn",
-        "video-render", "midi-breath", "lyrics-timeline", "midi-musicxml", "musicxml-midi",
-        "publish-pack"]);
+        "video-render", "asr-subtitle", "midi-breath", "lyrics-timeline", "midi-musicxml",
+        "musicxml-midi", "publish-pack"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -968,6 +968,117 @@ test("the render pipeline joins clips and serves the report", async () => {
     const failed = (await bad.json()).run;
     assert.equal(failed.status, "failed");
     assert.match(failed.error, /至少要两个片段/u);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the ASR pipeline turns audio into SRT and a transcript", async () => {
+  const requests = [];
+  const app = await boot({
+    asrProbe: async () => ({ available: true, reason: "", python: "python", model: "E:\\models\\small" }),
+    pythonPath: "python",
+    whisperModel: "E:\\models\\small",
+    mediaProbe: async () => ({
+      ffmpeg: { available: true, path: "ffmpeg", version: "test", reason: "" },
+      ffprobe: { available: true, path: "ffprobe", version: "test", reason: "" },
+      checkedAt: "2026-10-21T00:00:00.000Z",
+    }),
+    mediaRun: async (command, args) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { format_name: "mov,mp4", duration: "20", size: "8192" },
+            streams: [
+              { codec_type: "video", codec_name: "h264", width: 1280, height: 720 },
+              { codec_type: "audio", codec_name: "aac" },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      await writeFile(args[args.length - 1], Buffer.alloc(1024, 1));
+      return { stdout: "", stderr: "" };
+    },
+    pythonRun: async ({ input }) => {
+      requests.push(JSON.parse(input));
+      return {
+        stdout: `${JSON.stringify({
+          ok: true,
+          engine: "local:faster-whisper-small",
+          language: "zh",
+          language_probability: 0.97,
+          duration: 20,
+          elapsed: 3.4,
+          segments: [
+            { start: 0, end: 2.4, text: "开场第一句", words: [{ start: 0, end: 0.8, word: "开场" }] },
+            { start: 2.6, end: 6, text: "第二句话" },
+          ],
+        })}\n`,
+        stderr: "",
+        code: 0,
+      };
+    },
+  });
+  try {
+    const mediaDir = path.join(app.root, "asr-source");
+    await mkdir(mediaDir, { recursive: true });
+    const source = path.join(mediaDir, "talk.mp4");
+    await writeFile(source, Buffer.alloc(4096, 2));
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "asr-subtitle",
+        projectId: app.projectId,
+        params: { transcribe: { source, language: "zh" } },
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 201, text);
+    const { run } = JSON.parse(text);
+    assert.equal(run.status, "waiting_manual");
+    assert.deepEqual(run.steps.transcribe.artifacts.map((entry) => entry.slot), ["subtitles", "transcript"]);
+    assert.equal(run.steps.transcribe.artifacts[0].label, "字幕（SRT）");
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].language, "zh");
+    assert.equal(requests[0].vad, true);
+    assert.equal(requests[0].model, "E:\\models\\small");
+
+    const srt = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/subtitles/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(srt.status, 200);
+    assert.equal(srt.headers.get("content-type"), "application/x-subrip");
+    assert.match(await srt.text(), /00:00:00,000 --> 00:00:02,400/u);
+
+    const transcript = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/transcript`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(transcript.text, /开场第一句/u);
+    assert.match(transcript.text, /"language": "zh"/u);
+
+    const bad = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "asr-subtitle",
+        projectId: app.projectId,
+        params: { transcribe: { source, language: "fr" } },
+      }),
+    });
+    const badText = await bad.text();
+    assert.equal(bad.status, 400, badText);
+    assert.match(badText, /选项无效/u);
   } finally {
     await app.close();
   }

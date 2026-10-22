@@ -654,6 +654,61 @@ export const AUTOMATION_PIPELINES = Object.freeze([
     ],
   },
   {
+    id: "asr-subtitle",
+    name: "语音转字幕",
+    desc: "把来源白名单内的音频或视频转成 SRT 字幕与识别稿：本机 faster-whisper 识别，不上传云端。",
+    steps: [
+      {
+        id: "transcribe",
+        name: "识别语音",
+        runner: "app",
+        desc: "先用 FFmpeg 抽出 16 kHz 单声道音频，再交给本机 faster-whisper；短音频会自动关闭 VAD。",
+        action: "media.transcribe",
+        outputs: [
+          { slot: "subtitles", label: "字幕（SRT）" },
+          { slot: "transcript", label: "识别稿（JSON）" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "源文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的绝对路径",
+          },
+          {
+            key: "language",
+            label: "识别语言",
+            type: "select",
+            default: "auto",
+            options: [
+              { value: "auto", label: "自动识别" },
+              { value: "zh", label: "中文" },
+              { value: "en", label: "英文" },
+              { value: "yue", label: "粤语" },
+            ],
+          },
+          {
+            key: "vad",
+            label: "启用 VAD 静音过滤",
+            type: "toggle",
+            default: true,
+            hint: "短于 15 秒的音频会自动关闭，避免把仅有的人声滤掉",
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "核对断句与错字后结束本次运行，字幕可直接接「字幕封装」或「字幕烧录」。",
+        after: ["transcribe"],
+        manualHint: "核对字幕断句与错字后点击「我做完了」",
+      },
+    ],
+  },
+  {
     id: "midi-breath",
     name: "MIDI 气口",
     desc: "把带词旋律 MIDI 里的换气口补齐：拉宽谱面短休止、按句尾与长音切气口、限制乐句长度，并可整体移调。纯本机处理，不需要 FFmpeg。",

@@ -160,6 +160,18 @@ export const SKILLS = Object.freeze([
     hint: "需要 FFmpeg/ffprobe（含 libass）；会重新编码视频，字幕无法再关闭。",
   },
   {
+    id: "asr-subtitle",
+    name: "语音转字幕",
+    category: "production",
+    icon: "≣",
+    runner: "app",
+    pipelineId: "asr-subtitle",
+    requiresMedia: "ffmpeg",
+    requiresAsr: true,
+    desc: "把白名单内的音频或视频转成 SRT 字幕与识别稿，本机 faster-whisper 识别，不上传云端。",
+    hint: "需要 FFmpeg/ffprobe 与本机 Python + faster-whisper；设置 ALLROUND_AI_PYTHON 与 ALLROUND_AI_WHISPER_MODEL。",
+  },
+  {
     id: "media-render",
     name: "影音成片",
     category: "production",
@@ -307,7 +319,7 @@ function assertDocument(value) {
   return value;
 }
 
-function describeAvailability(skill, devices, media) {
+function describeAvailability(skill, devices, media, asr) {
   if (skill.comingSoon) {
     return {
       available: false,
@@ -317,10 +329,7 @@ function describeAvailability(skill, devices, media) {
       online: 0,
     };
   }
-  if (skill.requiresMedia === "ffmpeg") {
-    if (media?.ffmpeg?.available) {
-      return { available: true, reason: "", howTo: "", devices: 0, online: 0 };
-    }
+  if (skill.requiresMedia === "ffmpeg" && !media?.ffmpeg?.available) {
     return {
       available: false,
       reason: `未检测到 FFmpeg（${media?.ffmpeg?.reason || "未安装，或不在 PATH 里"}）。`,
@@ -328,6 +337,18 @@ function describeAvailability(skill, devices, media) {
       devices: 0,
       online: 0,
     };
+  }
+  if (skill.requiresAsr && !asr?.available) {
+    return {
+      available: false,
+      reason: `未检测到可用的 faster-whisper（${asr?.reason || "Python 或模型不可用"}）。`,
+      howTo: "安装 Python 与 faster-whisper，并设置 ALLROUND_AI_PYTHON / ALLROUND_AI_WHISPER_MODEL。",
+      devices: 0,
+      online: 0,
+    };
+  }
+  if (skill.requiresMedia === "ffmpeg" || skill.requiresAsr) {
+    return { available: true, reason: "", howTo: "", devices: 0, online: 0 };
   }
   if (!skill.capabilities?.length) {
     return { available: true, reason: "", howTo: "", devices: 0, online: 0 };
@@ -356,8 +377,8 @@ function describeAvailability(skill, devices, media) {
   };
 }
 
-function describeSkill(skill, disabled, devices, media) {
-  const availability = describeAvailability(skill, devices, media);
+function describeSkill(skill, disabled, devices, media, asr) {
+  const availability = describeAvailability(skill, devices, media, asr);
   return {
     id: skill.id,
     name: skill.name,
@@ -391,8 +412,9 @@ export async function createSkillStore(filePath) {
     async list(devices = [], options = {}) {
       if (!Array.isArray(devices)) throw new TypeError("devices must be an array");
       const media = options.media ?? null;
+      const asr = options.asr ?? null;
       const disabled = await disabledSet();
-      const skills = SKILLS.map((skill) => describeSkill(skill, disabled, devices, media));
+      const skills = SKILLS.map((skill) => describeSkill(skill, disabled, devices, media, asr));
       return {
         categories: SKILL_CATEGORIES.map((category) => ({ ...category })),
         skills,
