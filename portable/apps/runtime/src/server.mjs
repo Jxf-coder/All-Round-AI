@@ -28,6 +28,7 @@ import {
   createVideoReframeHandler,
 } from "./automation-media.mjs";
 import { createPublishPackHandler } from "./automation-publish.mjs";
+import { createPublishReceiptStore } from "./publish-receipts.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
@@ -317,6 +318,10 @@ export async function startLocalRuntime(options = {}) {
   const automationConfigStore = options.automationConfigStore
     ?? await createAutomationConfigStore(path.join(directories.config, "automation-config.json"));
   const automationArtifacts = path.join(directories.data, "artifacts");
+  // Receipts are written after a human publishes, so they live beside the run
+  // store instead of inside a frozen run snapshot.
+  const publishReceiptStore = options.publishReceiptStore
+    ?? await createPublishReceiptStore(path.join(directories.config, "publish-receipts.json"));
   // FFmpeg is external: probing only reports whether it is usable, so a missing
   // install disables rendering while the inventory pipeline keeps working.
   const mediaProbe = options.mediaProbe ?? createMediaToolProbe();
@@ -958,6 +963,7 @@ export async function startLocalRuntime(options = {}) {
       runs: await automation.list(),
       configs,
       media: await mediaProbe(),
+      receipts: await publishReceiptStore.list(),
     });
     return true;
   });
@@ -1141,6 +1147,69 @@ export async function startLocalRuntime(options = {}) {
       json(ctx.response, 200, { run });
     } catch (error) {
       await automationFailure(ctx, actor, "automation.cancel", ctx.params.id, error);
+    }
+    return true;
+  });
+
+  // Publish receipts. They are separate from the frozen run snapshot because a
+  // human writes them after the plan exists; every save is audited.
+  router.get("/api/publish/receipts", async (ctx) => {
+    if (!(await requireActor(ctx))) return true;
+    const runId = (ctx.url.searchParams.get("runId") ?? "").trim();
+    json(ctx.response, 200, { receipts: await publishReceiptStore.list(runId) });
+    return true;
+  });
+
+  router.post("/api/publish/receipts", async (ctx) => {
+    const actor = await requireActor(ctx);
+    if (!actor) return true;
+    let runId = "";
+    try {
+      const body = await readJsonBody(ctx.request, { maxBytes: 8 * 1024 });
+      runId = typeof body.runId === "string" ? body.runId.trim() : "";
+      const run = runId ? await automation.read(runId) : null;
+      if (!run) {
+        const error = new Error("运行不存在");
+        error.status = 404;
+        throw error;
+      }
+      if (run.pipelineId !== "publish-pack") {
+        const error = new Error("该运行不是发布包");
+        error.status = 400;
+        throw error;
+      }
+      const platformId = typeof body.platformId === "string" ? body.platformId.trim() : "";
+      if (run.params?.pack?.[platformId] !== true) {
+        const error = new Error("该平台不在本次发布范围内");
+        error.status = 400;
+        throw error;
+      }
+      const receipt = await publishReceiptStore.save({
+        runId,
+        platformId,
+        status: body.status,
+        url: body.url,
+        note: body.note,
+        by: actor.id,
+      });
+      await recordAudit({
+        actor: actor.id,
+        action: "publish.receipt",
+        target: runId,
+        outcome: "ok",
+        detail: `${platformId} · ${receipt.status}`,
+      });
+      json(ctx.response, 200, { receipt });
+    } catch (error) {
+      const status = error.status || 400;
+      await recordAudit({
+        actor: actor.id,
+        action: "publish.receipt",
+        target: runId || null,
+        outcome: status >= 500 ? "error" : "denied",
+        detail: error.message || "发布回执保存失败",
+      });
+      json(ctx.response, status, { error: error.message || "发布回执保存失败" });
     }
     return true;
   });

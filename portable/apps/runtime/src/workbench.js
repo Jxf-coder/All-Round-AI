@@ -2136,13 +2136,31 @@ async function refreshAutomation() {
         pipelines: body?.pipelines ?? [],
         runs: body?.runs ?? [],
         media: body?.media ?? null,
+        receipts: body?.receipts ?? [],
       }
-      : { pipelines: [], runs: [], media: null, error: body?.error || "读取自动化列表失败。" };
+      : { pipelines: [], runs: [], media: null, receipts: [], error: body?.error || "读取自动化列表失败。" };
     if (response?.ok) seedAutomationDraft(body?.configs);
   } catch {
-    automationState = { pipelines: [], runs: [], media: null, error: "连不上运行时，稍后再试。" };
+    automationState = { pipelines: [], runs: [], media: null, receipts: [], error: "连不上运行时，稍后再试。" };
   }
   renderAutomationBody();
+}
+
+async function savePublishReceipt(runId, platformId, url, status) {
+  automationError = null;
+  automationState = { ...(automationState ?? {}), busy: true };
+  renderAutomationBody();
+  try {
+    const response = await apiRequest("/api/publish/receipts", {
+      method: "POST",
+      body: JSON.stringify({ runId, platformId, status, url }),
+    });
+    const body = await response?.json().catch(() => null);
+    if (!response?.ok) automationError = body?.error || "回执保存失败。";
+  } catch {
+    automationError = "连不上运行时，稍后再试。";
+  }
+  await refreshAutomation();
 }
 
 async function automationAction(path, payload) {
@@ -2186,6 +2204,61 @@ function automationBadge(status, labels) {
 
 function automationPipelineName(state, id) {
   return (state.pipelines ?? []).find((pipeline) => pipeline.id === id)?.name ?? id;
+}
+
+function publishPlatformLabels(state, run) {
+  const pipeline = (state.pipelines ?? []).find((entry) => entry.id === run.pipelineId);
+  const labels = new Map();
+  for (const step of pipeline?.steps ?? []) {
+    for (const param of step.params ?? []) {
+      if (param.type === "toggle") labels.set(param.key, param.label);
+    }
+  }
+  return labels;
+}
+
+function publishReceiptBlock(state, run) {
+  const labels = publishPlatformLabels(state, run);
+  const pack = run.params?.pack ?? {};
+  const platforms = [...labels.keys()].filter((id) => pack[id] === true);
+  if (!platforms.length) return null;
+  const block = element("div", "publish-receipts");
+  block.append(element("h4", null, "发布回执"));
+  block.append(element("p", "panel-note", "发布后在对应平台填入作品链接；保存会写入回执并留审计。"));
+  for (const id of platforms) {
+    const receipt = (state.receipts ?? []).find(
+      (row) => row.runId === run.id && row.platformId === id,
+    );
+    const row = element("div", "publish-receipt");
+    row.append(element("b", null, labels.get(id)));
+    const input = element("input", "publish-receipt-url");
+    input.type = "url";
+    input.placeholder = "https://…";
+    input.value = receipt?.url ?? "";
+    row.append(input);
+    const save = actionButton(
+      "保存回执",
+      () => void savePublishReceipt(run.id, id, input.value, "published"),
+    );
+    const fail = actionButton(
+      "标记失败",
+      () => void savePublishReceipt(run.id, id, input.value, "failed"),
+    );
+    if (state.busy) {
+      save.disabled = true;
+      fail.disabled = true;
+    }
+    row.append(save, fail);
+    row.append(element(
+      "span",
+      receipt ? "publish-receipt-state saved" : "publish-receipt-state",
+      receipt
+        ? `${receipt.status === "published" ? "已发布" : "发布失败"} · ${deviceTime(receipt.updatedAt)}`
+        : "未回填",
+    ));
+    block.append(row);
+  }
+  return block;
 }
 
 function automationParamField(pipeline, step, param) {
@@ -2356,6 +2429,10 @@ function renderAutomationBody() {
       list.append(row);
     }
     card.append(list);
+    if (run.pipelineId === "publish-pack" && run.status !== "failed") {
+      const receipts = publishReceiptBlock(state, run);
+      if (receipts) card.append(receipts);
+    }
     if (run.error) card.append(element("p", "device-error", run.error));
     if (run.status === "running" || run.status === "waiting_manual") {
       const actions = element("div", "device-actions");

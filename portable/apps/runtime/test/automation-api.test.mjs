@@ -857,6 +857,132 @@ test("the publish pipeline writes a plan and a manifest without calling a platfo
   }
 });
 
+test("publish receipts are scoped to the run, validated and audited", async () => {
+  const app = await boot();
+  try {
+    const mediaDir = path.join(app.root, "receipt-source");
+    await mkdir(mediaDir, { recursive: true });
+    const source = path.join(mediaDir, "final.mp4");
+    await writeFile(source, Buffer.alloc(1024, 1));
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+
+    const started = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "publish-pack",
+        projectId: app.projectId,
+        params: {
+          pack: {
+            source,
+            title: "标题",
+            description: "",
+            douyin: true,
+            wechat: false,
+            xiaohongshu: false,
+          },
+        },
+      }),
+    });
+    assert.equal(started.status, 201);
+    const { run } = await started.json();
+
+    assert.equal((await fetch(`${app.runtime.url}/api/publish/receipts`)).status, 401);
+
+    const saved = await fetch(`${app.runtime.url}/api/publish/receipts`, {
+      method: "POST",
+      headers: app.member,
+      body: JSON.stringify({
+        runId: run.id,
+        platformId: "douyin",
+        status: "published",
+        url: "https://www.douyin.com/video/123",
+      }),
+    });
+    assert.equal(saved.status, 200);
+    const receipt = (await saved.json()).receipt;
+    assert.equal(receipt.status, "published");
+    assert.equal(receipt.updatedBy, "member@example.test");
+
+    const listed = await (await fetch(`${app.runtime.url}/api/publish/receipts?runId=${run.id}`, {
+      headers: { cookie: app.member.cookie },
+    })).json();
+    assert.equal(listed.receipts.length, 1);
+    assert.equal(listed.receipts[0].url, "https://www.douyin.com/video/123");
+
+    const automation = await (await fetch(`${app.runtime.url}/api/automation?projectId=${app.projectId}`, {
+      headers: { cookie: app.member.cookie },
+    })).json();
+    assert.equal(automation.receipts.length, 1);
+
+    const notInScope = await fetch(`${app.runtime.url}/api/publish/receipts`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        runId: run.id,
+        platformId: "xiaohongshu",
+        status: "published",
+        url: "https://example.com/x",
+      }),
+    });
+    assert.equal(notInScope.status, 400);
+    assert.match((await notInScope.json()).error, /不在本次发布范围/u);
+
+    const badUrl = await fetch(`${app.runtime.url}/api/publish/receipts`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        runId: run.id,
+        platformId: "douyin",
+        status: "published",
+        url: "ftp://example.com/x",
+      }),
+    });
+    assert.equal(badUrl.status, 400);
+    assert.match((await badUrl.json()).error, /http\(s\)/u);
+
+    const otherPipeline = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ pipelineId: "knowledge-brief", projectId: app.projectId, params: {} }),
+    });
+    const briefRun = (await otherPipeline.json()).run;
+    const wrongPipeline = await fetch(`${app.runtime.url}/api/publish/receipts`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        runId: briefRun.id,
+        platformId: "douyin",
+        status: "failed",
+        url: "",
+      }),
+    });
+    assert.equal(wrongPipeline.status, 400);
+    assert.match((await wrongPipeline.json()).error, /不是发布包/u);
+
+    const missingRun = await fetch(`${app.runtime.url}/api/publish/receipts`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ runId: "run_missing", platformId: "douyin", status: "failed", url: "" }),
+    });
+    assert.equal(missingRun.status, 404);
+
+    const audit = await (await fetch(`${app.runtime.url}/api/audit?limit=20`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+    const rows = audit.entries.filter((entry) => entry.action === "publish.receipt");
+    assert.equal(rows.filter((entry) => entry.outcome === "ok").length, 1);
+    assert.equal(rows.filter((entry) => entry.outcome === "denied").length, 4);
+    assert.ok(rows.some((entry) => entry.target === run.id));
+  } finally {
+    await app.close();
+  }
+});
+
 test("invalid automation requests are refused and audited", async () => {
   const app = await boot();
   try {
