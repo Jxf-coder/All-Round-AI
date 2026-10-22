@@ -513,6 +513,75 @@ export const AUTOMATION_PIPELINES = Object.freeze([
       },
     ],
   },
+  {
+    id: "publish-pack",
+    name: "发布包",
+    desc: "把成片的标题、文案与平台检查项整理成发布清单和 JSON；不调用任何平台接口，由人工发布后回填回执。",
+    steps: [
+      {
+        id: "pack",
+        name: "生成发布清单",
+        runner: "app",
+        desc: "校验视频在白名单内，按所选平台生成 Markdown 清单与可机读的 JSON。",
+        action: "publish.package",
+        outputs: [
+          { slot: "plan", label: "发布清单" },
+          { slot: "manifest", label: "发布清单（JSON）" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "成片文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的视频文件",
+          },
+          {
+            key: "title",
+            label: "标题",
+            type: "text",
+            required: true,
+            maxLength: 120,
+          },
+          {
+            key: "description",
+            label: "文案",
+            type: "text",
+            multiline: true,
+            maxLength: 2000,
+            hint: "正文、话题标签都写在这里；会原样写入清单",
+          },
+          {
+            key: "douyin",
+            label: "抖音",
+            type: "toggle",
+            default: true,
+          },
+          {
+            key: "wechat",
+            label: "视频号",
+            type: "toggle",
+            default: true,
+          },
+          {
+            key: "xiaohongshu",
+            label: "小红书",
+            type: "toggle",
+            default: false,
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "发布回执",
+        runner: "manual",
+        desc: "按清单在各平台手动发布后结束本次运行。",
+        after: ["pack"],
+        manualHint: "在各平台发布并回填作品链接后点击「我做完了」，确认人与时间即为回执",
+      },
+    ],
+  },
 ]);
 
 function fail(message) {

@@ -27,6 +27,7 @@ import {
   createVideoNormalizeHandler,
   createVideoReframeHandler,
 } from "./automation-media.mjs";
+import { createPublishPackHandler } from "./automation-publish.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
 import { createProjectStore } from "./projects.mjs";
@@ -72,6 +73,7 @@ const ARTIFACT_CONTENT_TYPES = new Map([
   [".mp3", "audio/mpeg"],
   [".wav", "audio/wav"],
   [".srt", "application/x-subrip"],
+  [".json", "application/json"],
   [".mp4", "video/mp4"],
   [".mov", "video/quicktime"],
   [".png", "image/png"],
@@ -375,6 +377,10 @@ export async function startLocalRuntime(options = {}) {
         artifactsDir: automationArtifacts,
         mediaProbe,
         runner: options.mediaRun,
+      }),
+      ...createPublishPackHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
       }),
     },
   });
@@ -982,12 +988,15 @@ export async function startLocalRuntime(options = {}) {
         actor: actor.id,
         params: await effectiveAutomationParams(projectId, body.pipelineId, body.params),
       });
-      // Remember what was actually accepted. A failure here must not fail a run
-      // that already started, so it is logged instead.
-      try {
-        await automationConfigStore.save(projectId, body.pipelineId, run.params);
-      } catch (error) {
-        void logger.warn("Pipeline config could not be saved", { message: error.message });
+      // Remember what was actually accepted, but never let a run that failed on
+      // its first step overwrite a working set of params. A save failure must
+      // not fail a run that already started, so it is logged instead.
+      if (run.status !== "failed") {
+        try {
+          await automationConfigStore.save(projectId, body.pipelineId, run.params);
+        } catch (error) {
+          void logger.warn("Pipeline config could not be saved", { message: error.message });
+        }
       }
       await recordAudit({
         actor: actor.id,

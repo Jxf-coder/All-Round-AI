@@ -159,6 +159,16 @@ export const SKILLS = Object.freeze([
     hint: "随阶段 4D 的影音产线一起开放。",
   },
   {
+    id: "publish-pack",
+    name: "发布包",
+    category: "production",
+    icon: "⇢",
+    runner: "app",
+    pipelineId: "publish-pack",
+    desc: "把标题、文案与平台检查项整理成发布清单与 JSON，人工发布后回填回执。",
+    hint: "不调用平台接口、不保存账号；只生成本地清单，发布动作由人完成。",
+  },
+  {
     id: "distribute",
     name: "多平台分发",
     category: "production",

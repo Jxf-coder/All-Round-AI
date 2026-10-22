@@ -70,10 +70,10 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 9);
+    assert.equal(body.pipelines.length, 10);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
-        "audio-extract", "video-normalize", "video-reframe", "video-subtitle"]);
+        "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "publish-pack"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -769,6 +769,89 @@ test("the subtitle pipeline muxes an SRT and serves both artifacts", async () =>
     const failed = (await bad.json()).run;
     assert.equal(failed.status, "failed");
     assert.match(failed.error, /缺少时间码/u);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the publish pipeline writes a plan and a manifest without calling a platform", async () => {
+  const app = await boot();
+  try {
+    const mediaDir = path.join(app.root, "publish-source");
+    await mkdir(mediaDir, { recursive: true });
+    const source = path.join(mediaDir, "final.mp4");
+    await writeFile(source, Buffer.alloc(2048, 1));
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "publish-pack",
+        projectId: app.projectId,
+        params: {
+          pack: {
+            source,
+            title: "售后不是成本",
+            description: "两小时响应。\n#售后 #效率",
+            douyin: true,
+            wechat: true,
+            xiaohongshu: false,
+          },
+        },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { run } = await response.json();
+    assert.equal(run.status, "waiting_manual");
+    assert.deepEqual(run.steps.pack.artifacts.map((entry) => entry.slot), ["plan", "manifest"]);
+
+    const plan = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/plan`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(plan.text, /^# 发布清单 · 售后不是成本/u);
+    assert.match(plan.text, /### 抖音/u);
+    assert.match(plan.text, /不会自动上传到任何平台/u);
+
+    const manifestDownload = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/manifest/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(manifestDownload.status, 200);
+    assert.equal(manifestDownload.headers.get("content-type"), "application/json");
+    const manifest = JSON.parse(await manifestDownload.text());
+    assert.equal(manifest.content.title, "售后不是成本");
+    assert.deepEqual(manifest.platforms.map((platform) => platform.id), ["douyin", "wechat"]);
+    assert.equal(manifest.platforms.every((platform) => platform.uploaded === false), true);
+
+    const bad = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "publish-pack",
+        projectId: app.projectId,
+        params: {
+          pack: { source, title: "标题", douyin: false, wechat: false, xiaohongshu: false },
+        },
+      }),
+    });
+    assert.equal(bad.status, 201);
+    const failed = (await bad.json()).run;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /至少要选择一个发布平台/u);
+
+    // A failed run must not overwrite the last working params.
+    const listed = await (await fetch(`${app.runtime.url}/api/automation?projectId=${app.projectId}`, {
+      headers: { cookie: app.admin.cookie },
+    })).json();
+    assert.equal(listed.configs["publish-pack"].params.pack.douyin, true);
+    assert.equal(listed.configs["publish-pack"].params.pack.wechat, true);
+    assert.equal(listed.configs["publish-pack"].params.pack.xiaohongshu, false);
   } finally {
     await app.close();
   }
