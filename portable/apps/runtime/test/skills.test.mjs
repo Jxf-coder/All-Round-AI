@@ -75,7 +75,7 @@ test("the catalog lists implemented capabilities and keeps later phases visible"
     assert.match(mediaReady.get("asr-subtitle").reason, /faster-whisper/u);
     assert.equal(skills.get("publish-pack").enabled, true);
     assert.equal(skills.get("publish-pack").available, true);
-    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 23, available: 12, comingSoon: 3 });
+    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 24, available: 13, comingSoon: 3 });
   } finally {
     await fixture.close();
   }

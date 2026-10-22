@@ -72,12 +72,12 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 18);
+    assert.equal(body.pipelines.length, 19);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
         "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "video-burn",
         "video-render", "asr-subtitle", "asr-batch", "midi-breath", "lyrics-timeline",
-        "midi-musicxml", "musicxml-midi", "publish-pack"]);
+        "midi-musicxml", "musicxml-midi", "music-batch", "publish-pack"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -1478,6 +1478,61 @@ test("the MusicXML import pipeline converts a score back to MIDI", async () => {
     const midi = parseMidi(Buffer.from(await download.arrayBuffer()));
     assert.deepEqual(midi.notes.map((note) => note.pitch), [60, 62]);
     assert.deepEqual(midi.notes.map((note) => note.lyric), ["只", "剩"]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the music batch pipeline processes a folder and reports every file", async () => {
+  const app = await boot();
+  try {
+    const sourceDir = path.join(app.root, "music-batch");
+    await mkdir(sourceDir, { recursive: true });
+    const midi = writeMidi({
+      notes: [
+        { t0: 0, t1: 0.5, pitch: 60, lyric: "只" },
+        { t0: 0.5, t1: 1.5, pitch: 62, lyric: "剩" },
+      ],
+      meta: { ticksPerBeat: 480, tempoUs: 500_000, timeSignature: { numerator: 4, denominator: 4 } },
+    });
+    await writeFile(path.join(sourceDir, "one.mid"), midi);
+    await writeFile(path.join(sourceDir, "two.mid"), midi);
+    await writeFile(path.join(sourceDir, "broken.mid"), Buffer.from("not a midi", "utf8"));
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [sourceDir] }),
+    });
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "music-batch",
+        projectId: app.projectId,
+        params: { batch: { root: sourceDir, task: "export", maxFiles: 5, fifths: 1 } },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { run } = await response.json();
+    assert.equal(run.status, "waiting_manual");
+    const slots = run.steps.batch.artifacts.map((entry) => entry.slot);
+    assert.deepEqual(slots, ["product-1", "product-2", "report-json", "report-markdown"]);
+
+    const report = JSON.parse((await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/report-json`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json()).text);
+    assert.deepEqual(report.counts, { ok: 2, failed: 1 });
+    assert.equal(report.params.fifths, 1);
+
+    const download = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/product-1/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get("content-type"), "application/vnd.recordare.musicxml+xml");
+    assert.match(await download.text(), /<fifths>1<\/fifths>/u);
   } finally {
     await app.close();
   }

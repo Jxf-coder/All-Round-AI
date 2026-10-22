@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import assert from "node:assert/strict";
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -113,9 +113,9 @@ test("the catalog is readable by any session and reports missing desk capability
     });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(body.skills.length, 26);
-    assert.equal(body.stats.enabled, 23);
-    assert.equal(body.stats.available, 12);
+    assert.equal(body.skills.length, 27);
+    assert.equal(body.stats.enabled, 24);
+    assert.equal(body.stats.available, 13);
     assert.equal(body.stats.comingSoon, 3);
 
     const files = body.skills.find((skill) => skill.id === "local-files");
@@ -137,7 +137,7 @@ test("the catalog is readable by any session and reports missing desk capability
     const readyFiles = refreshed.skills.find((skill) => skill.id === "local-files");
     assert.equal(readyFiles.available, true);
     assert.equal(readyFiles.devices, 1);
-    assert.equal(refreshed.stats.available, 14);
+    assert.equal(refreshed.stats.available, 15);
   } finally {
     await app.close();
   }
@@ -164,7 +164,7 @@ test("only an administrator can flip a switch and every attempt is audited", asy
     assert.equal(off.status, 200);
     const listed = await off.json();
     assert.equal(listed.skills.find((skill) => skill.id === "local-screen").enabled, false);
-    assert.equal(listed.stats.enabled, 22);
+    assert.equal(listed.stats.enabled, 23);
 
     const audit = await (await fetch(`${app.runtime.url}/api/audit?limit=100`, {
       headers: { cookie: app.admin.cookie },

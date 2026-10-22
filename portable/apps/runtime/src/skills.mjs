@@ -255,6 +255,16 @@ export const SKILLS = Object.freeze([
     hint: "不需要 FFmpeg；和弦、多声部与装饰音会被明确拒绝。",
   },
   {
+    id: "music-batch",
+    name: "音乐批量处理",
+    category: "production",
+    icon: "⋯",
+    runner: "app",
+    pipelineId: "music-batch",
+    desc: "把目录里的 MIDI 或 MusicXML 一次性补齐气口、导出旋律谱或转回 MIDI，并输出逐文件汇总报告。",
+    hint: "不需要 FFmpeg；失败文件记入报告但不打断其余文件，只处理目录第一层。",
+  },
+  {
     id: "music-midi",
     name: "音乐 / MIDI",
     category: "production",

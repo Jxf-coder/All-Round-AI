@@ -32,6 +32,7 @@ import { createPublishPackHandler } from "./automation-publish.mjs";
 import { createMidiBreathHandler } from "./automation-midi.mjs";
 import { createLyricsTimelineHandler } from "./automation-lyrics.mjs";
 import { createMusicXmlHandler } from "./automation-musicxml.mjs";
+import { createMusicBatchHandler } from "./automation-music-batch.mjs";
 import { createRenderHandler } from "./automation-render.mjs";
 import { createAsrBatchHandler, createAsrHandler, createAsrProbe } from "./asr.mjs";
 import { createPublishReceiptStore } from "./publish-receipts.mjs";
@@ -444,6 +445,10 @@ export async function startLocalRuntime(options = {}) {
         artifactsDir: automationArtifacts,
       }),
       ...createMusicXmlHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+      }),
+      ...createMusicBatchHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
       }),
