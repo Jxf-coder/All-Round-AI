@@ -30,6 +30,7 @@ import {
 import { createPublishPackHandler } from "./automation-publish.mjs";
 import { createMidiBreathHandler } from "./automation-midi.mjs";
 import { createLyricsTimelineHandler } from "./automation-lyrics.mjs";
+import { createMusicXmlHandler } from "./automation-musicxml.mjs";
 import { createPublishReceiptStore } from "./publish-receipts.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
@@ -79,6 +80,7 @@ const ARTIFACT_CONTENT_TYPES = new Map([
   [".lrc", "text/plain; charset=utf-8"],
   [".mid", "audio/midi"],
   [".midi", "audio/midi"],
+  [".musicxml", "application/vnd.recordare.musicxml+xml"],
   [".json", "application/json"],
   [".mp4", "video/mp4"],
   [".mov", "video/quicktime"],
@@ -397,6 +399,10 @@ export async function startLocalRuntime(options = {}) {
         artifactsDir: automationArtifacts,
       }),
       ...createLyricsTimelineHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+      }),
+      ...createMusicXmlHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
       }),

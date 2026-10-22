@@ -662,6 +662,58 @@ export const AUTOMATION_PIPELINES = Object.freeze([
     ],
   },
   {
+    id: "midi-musicxml",
+    name: "旋律导出",
+    desc: "把带词旋律 MIDI 导出成单声部 MusicXML：音高、时值、跨小节延音线、休止与歌词都会保留，可直接用制谱软件打开。",
+    steps: [
+      {
+        id: "export",
+        name: "导出旋律谱",
+        runner: "app",
+        desc: "读取白名单内的 MIDI，按拍号切分小节，补齐休止并把跨小节音符拆成延音线。",
+        action: "midi.to-musicxml",
+        outputs: [
+          { slot: "musicxml", label: "旋律谱（MusicXML）" },
+          { slot: "report", label: "导出报告（JSON）" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "带词 MIDI",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的 .mid / .midi 文件",
+          },
+          {
+            key: "title",
+            label: "曲名（可选）",
+            type: "text",
+            maxLength: 120,
+            hint: "留空则使用源文件名",
+          },
+          {
+            key: "fifths",
+            label: "调号（五度圈）",
+            type: "number",
+            default: 0,
+            min: -7,
+            max: 7,
+            hint: "0 = C 大调；正数升号、负数降号，例如 3 = A 大调、-2 = B♭ 大调",
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "用制谱软件打开并核对音高、时值与歌词后结束本次运行。",
+        after: ["export"],
+        manualHint: "在制谱软件中核对音高、时值与歌词后点击「我做完了」",
+      },
+    ],
+  },
+  {
     id: "publish-pack",
     name: "发布包",
     desc: "把成片的标题、文案与平台检查项整理成发布清单和 JSON；不调用任何平台接口，由人工发布后回填回执。",

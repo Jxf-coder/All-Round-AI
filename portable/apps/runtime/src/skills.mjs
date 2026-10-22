@@ -199,6 +199,16 @@ export const SKILLS = Object.freeze([
     hint: "纯文本处理，不需要 FFmpeg；无时间码的行会保留在报告里但不会猜时间。",
   },
   {
+    id: "midi-musicxml",
+    name: "旋律导出",
+    category: "production",
+    icon: "𝄞",
+    runner: "app",
+    pipelineId: "midi-musicxml",
+    desc: "把带词旋律 MIDI 导出成单声部 MusicXML，保留音高、时值、延音线、休止与歌词。",
+    hint: "不需要 FFmpeg；导出的 .musicxml 可直接用 MuseScore 等制谱软件打开。",
+  },
+  {
     id: "music-midi",
     name: "音乐 / MIDI",
     category: "production",

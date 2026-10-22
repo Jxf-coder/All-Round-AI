@@ -58,7 +58,7 @@ test("the catalog lists implemented capabilities and keeps later phases visible"
     assert.equal(skills.get("video-subtitle").available, false);
     assert.equal(skills.get("publish-pack").enabled, true);
     assert.equal(skills.get("publish-pack").available, true);
-    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 17, available: 10, comingSoon: 4 });
+    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 18, available: 11, comingSoon: 4 });
   } finally {
     await fixture.close();
   }
