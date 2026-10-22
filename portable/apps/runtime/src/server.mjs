@@ -23,6 +23,7 @@ import { createRewriteHandler, createScriptDraftHandler, createTopicPackHandler 
 import {
   createAudioExtractHandler,
   createMediaInventoryHandler,
+  createSubtitleBurnHandler,
   createSubtitleMuxHandler,
   createVideoNormalizeHandler,
   createVideoReframeHandler,
@@ -385,6 +386,12 @@ export async function startLocalRuntime(options = {}) {
         runner: options.mediaRun,
       }),
       ...createSubtitleMuxHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+        mediaProbe,
+        runner: options.mediaRun,
+      }),
+      ...createSubtitleBurnHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
         mediaProbe,

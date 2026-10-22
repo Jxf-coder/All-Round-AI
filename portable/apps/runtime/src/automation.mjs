@@ -514,6 +514,72 @@ export const AUTOMATION_PIPELINES = Object.freeze([
     ],
   },
   {
+    id: "video-burn",
+    name: "字幕烧录",
+    desc: "把 SRT 字幕直接烧进画面，导出各平台都能直接播放的硬字幕 MP4，同时留下 SRT 文件。",
+    steps: [
+      {
+        id: "burn",
+        name: "烧录字幕",
+        runner: "app",
+        desc: "校验 SRT 时间码与顺序后，由 FFmpeg 重新编码视频并把字幕渲染进画面。",
+        action: "media.burn-subtitles",
+        outputs: [
+          { slot: "video", label: "带字幕视频" },
+          { slot: "subtitles", label: "字幕文件" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "源文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的绝对路径",
+          },
+          {
+            key: "subtitles",
+            label: "SRT 字幕",
+            type: "text",
+            multiline: true,
+            required: true,
+            maxLength: 8000,
+            hint: "格式：序号（可省略）／00:00:01,000 --> 00:00:03,000／字幕文字，空行分隔",
+          },
+          {
+            key: "size",
+            label: "字号",
+            type: "select",
+            default: "medium",
+            options: [
+              { value: "small", label: "小" },
+              { value: "medium", label: "中" },
+              { value: "large", label: "大" },
+            ],
+          },
+          {
+            key: "position",
+            label: "字幕位置",
+            type: "select",
+            default: "bottom",
+            options: [
+              { value: "bottom", label: "底部" },
+              { value: "top", label: "顶部" },
+            ],
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "播放成片，确认字幕清晰且没有遮挡画面信息后结束本次运行。",
+        after: ["burn"],
+        manualHint: "播放带字幕成片，确认字号与位置后点击「我做完了」",
+      },
+    ],
+  },
+  {
     id: "midi-breath",
     name: "MIDI 气口",
     desc: "把带词旋律 MIDI 里的换气口补齐：拉宽谱面短休止、按句尾与长音切气口、限制乐句长度，并可整体移调。纯本机处理，不需要 FFmpeg。",

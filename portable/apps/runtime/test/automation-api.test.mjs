@@ -72,11 +72,11 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 14);
+    assert.equal(body.pipelines.length, 15);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
-        "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "midi-breath",
-        "lyrics-timeline", "midi-musicxml", "musicxml-midi", "publish-pack"]);
+        "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "video-burn",
+        "midi-breath", "lyrics-timeline", "midi-musicxml", "musicxml-midi", "publish-pack"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -769,6 +769,96 @@ test("the subtitle pipeline muxes an SRT and serves both artifacts", async () =>
       }),
     });
     assert.equal(bad.status, 201);
+    const failed = (await bad.json()).run;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /缺少时间码/u);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the burn pipeline hardcodes an SRT and serves the result", async () => {
+  const encodes = [];
+  const app = await boot({
+    mediaProbe: async () => ({
+      ffmpeg: { available: true, path: "ffmpeg", version: "test", reason: "" },
+      ffprobe: { available: true, path: "ffprobe", version: "test", reason: "" },
+      checkedAt: "2026-10-21T00:00:00.000Z",
+    }),
+    mediaRun: async (command, args, options) => {
+      if (args.includes("-print_format")) {
+        return {
+          stdout: JSON.stringify({
+            format: { format_name: "mov,mp4", duration: "10", size: "4096" },
+            streams: [
+              { codec_type: "video", codec_name: "h264", width: 1280, height: 720 },
+              { codec_type: "audio", codec_name: "aac" },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      encodes.push({ command, args, options });
+      await writeFile(args[args.length - 1], Buffer.alloc(3072, 5));
+      return { stdout: "", stderr: "" };
+    },
+  });
+  try {
+    const mediaDir = path.join(app.root, "burn-source");
+    await mkdir(mediaDir, { recursive: true });
+    const source = path.join(mediaDir, "clip.mp4");
+    await writeFile(source, Buffer.alloc(4096, 1));
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+
+    const srt = "1\n00:00:00,500 --> 00:00:02,000\n第一句\n\n2\n00:00:02,500 --> 00:00:04,000\n第二句\n";
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "video-burn",
+        projectId: app.projectId,
+        params: { burn: { source, subtitles: srt, size: "large", position: "top" } },
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 201, text);
+    const { run } = JSON.parse(text);
+    assert.equal(run.status, "waiting_manual");
+    assert.deepEqual(run.steps.burn.artifacts.map((entry) => entry.slot), ["video", "subtitles"]);
+    assert.equal(run.steps.burn.artifacts[0].label, "带字幕视频（MP4 / 硬字幕）");
+
+    assert.equal(encodes.length, 1);
+    const filter = encodes[0].args[encodes[0].args.indexOf("-vf") + 1];
+    assert.match(filter, /FontSize=32,Alignment=8/u);
+    assert.equal(encodes[0].options.cwd, path.dirname(run.steps.burn.artifacts[1].path));
+
+    const video = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/video/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(video.status, 200);
+    assert.equal(video.headers.get("content-type"), "video/mp4");
+    assert.equal((await video.arrayBuffer()).byteLength, 3072);
+
+    const preview = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/subtitles`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(preview.text, /第一句/u);
+
+    const bad = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "video-burn",
+        projectId: app.projectId,
+        params: { burn: { source, subtitles: "没有时间码" } },
+      }),
+    });
     const failed = (await bad.json()).run;
     assert.equal(failed.status, "failed");
     assert.match(failed.error, /缺少时间码/u);

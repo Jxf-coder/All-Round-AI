@@ -2431,6 +2431,13 @@ function renderAutomationBody() {
           ),
         ));
       }
+      // Step logs carry what happened (source, size, chosen style). They stay
+      // on the card so an operator can judge a run without opening the API.
+      if (Array.isArray(stepState.logs) && stepState.logs.length) {
+        const logs = element("ul", "automation-logs");
+        for (const line of stepState.logs) logs.append(element("li", null, line));
+        row.append(logs);
+      }
       list.append(row);
     }
     card.append(list);

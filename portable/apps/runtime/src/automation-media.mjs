@@ -659,6 +659,130 @@ export function createSubtitleMuxHandler({
   });
 }
 
+// Hard subtitles are the fallback for every platform that ignores soft tracks:
+// the SRT is rendered onto the picture by libass and the result plays anywhere.
+// The style knobs stay deliberately small (three sizes, two positions) so the
+// output is predictable across platforms.
+export const BURN_FONT_SIZES = Object.freeze({
+  small: { label: "小", size: 18 },
+  medium: { label: "中", size: 24 },
+  large: { label: "大", size: 32 },
+});
+
+export const BURN_POSITIONS = Object.freeze({
+  bottom: { label: "底部", alignment: 2, marginV: 28 },
+  top: { label: "顶部", alignment: 8, marginV: 28 },
+});
+
+export function createSubtitleBurnHandler({
+  sourceStore,
+  artifactsDir,
+  mediaProbe,
+  runner,
+} = {}) {
+  if (!sourceStore || typeof sourceStore.list !== "function") {
+    throw new TypeError("字幕烧录需要来源配置");
+  }
+  if (typeof artifactsDir !== "string" || !path.isAbsolute(artifactsDir)) {
+    throw new TypeError("产物目录必须是绝对路径");
+  }
+  if (typeof mediaProbe !== "function") throw new TypeError("字幕烧录需要媒体工具探测");
+
+  return Object.freeze({
+    "media.burn-subtitles": async ({ run, params }) => {
+      const tools = await mediaProbe();
+      if (!tools?.ffmpeg?.available || !tools?.ffprobe?.available) {
+        throw new Error("未检测到 FFmpeg/ffprobe，请安装后重试（或设置 FFMPEG_PATH/FFPROBE_PATH）");
+      }
+      const size = BURN_FONT_SIZES[params.size ?? "medium"];
+      if (!size) throw new Error("字号无效");
+      const position = BURN_POSITIONS[params.position ?? "bottom"];
+      if (!position) throw new Error("字幕位置无效");
+      const cues = parseSrt(params.subtitles);
+      const roots = (await sourceStore.list()).roots;
+      const source = await resolveAllowedFile(params.source, roots);
+
+      let media;
+      try {
+        media = await probeMediaFile({
+          ffprobePath: tools.ffprobe.path,
+          filePath: source,
+          runner,
+        });
+      } catch (error) {
+        throw new Error(`无法读取媒体信息：${error.message}`);
+      }
+      if (!media.video) throw new Error("源文件没有视频轨");
+      const lastEnd = cues[cues.length - 1].end;
+      if (media.duration && lastEnd > Math.ceil(media.duration * 1_000) + 1_000) {
+        throw new Error(`字幕超出视频时长（最后一条结束于 ${(lastEnd / 1_000).toFixed(1)} 秒）`);
+      }
+
+      const directory = path.join(artifactsDir, safeRunName(run.id));
+      await mkdir(directory, { recursive: true });
+      const srtFile = path.join(directory, "subtitles.srt");
+      const videoFile = path.join(directory, "burned.mp4");
+      const text = formatSrt(cues);
+      await writeFile(srtFile, text, { encoding: "utf8", mode: 0o600 });
+      await rm(videoFile, { force: true }).catch(() => {});
+
+      const filter = `subtitles=subtitles.srt:force_style='FontSize=${size.size},`
+        + `Alignment=${position.alignment},MarginV=${position.marginV},Outline=1,Shadow=0'`;
+      const timeoutMs = media.duration
+        ? Math.min(Math.max(Math.ceil(media.duration * 4_000), 120_000), 1_800_000)
+        : 600_000;
+      try {
+        await runMediaTool({
+          command: tools.ffmpeg.path,
+          args: [
+            "-hide_banner", "-nostdin", "-y",
+            "-i", source,
+            "-vf", filter,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-c:a", "aac", "-b:a", "160k",
+            videoFile,
+          ],
+          timeoutMs,
+          cwd: directory,
+          runner,
+        });
+      } catch (error) {
+        await rm(videoFile, { force: true }).catch(() => {});
+        await rm(srtFile, { force: true }).catch(() => {});
+        const detail = String(error?.message ?? "未知错误").split(/\r?\n/u)[0].slice(0, 300);
+        throw new Error(`字幕烧录失败：${detail}`);
+      }
+
+      let output;
+      try {
+        output = await stat(videoFile);
+      } catch {
+        await rm(srtFile, { force: true }).catch(() => {});
+        throw new Error("字幕烧录失败：没有生成输出文件");
+      }
+      if (!output.isFile() || output.size === 0) {
+        await rm(videoFile, { force: true }).catch(() => {});
+        await rm(srtFile, { force: true }).catch(() => {});
+        throw new Error("字幕烧录失败：输出文件为空");
+      }
+
+      const srtBytes = Buffer.byteLength(text, "utf8");
+      return {
+        artifacts: [
+          { slot: "video", label: "带字幕视频（MP4 / 硬字幕）", path: videoFile, bytes: output.size },
+          { slot: "subtitles", label: "字幕文件（SRT）", path: srtFile, bytes: srtBytes },
+        ],
+        logs: [
+          `源文件：${path.basename(source)}，时长 ${durationText(media.duration)}`,
+          `字幕 ${cues.length} 条；字号${size.label}（${size.size}），位置${position.label}`,
+          `视频 ${formatSize(output.size)}；SRT ${formatSize(srtBytes)}`,
+        ],
+      };
+    },
+  });
+}
+
 // Audio extraction probes the source first, refuses files without an audio
 // track, and removes a partial output when the encoder fails so the run never
 // points at a broken artifact.

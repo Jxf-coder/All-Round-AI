@@ -149,6 +149,17 @@ export const SKILLS = Object.freeze([
     hint: "需要 FFmpeg/ffprobe；字幕必须是合法 SRT，时间码按先后排列。",
   },
   {
+    id: "video-burn",
+    name: "字幕烧录",
+    category: "production",
+    icon: "▣",
+    runner: "app",
+    pipelineId: "video-burn",
+    requiresMedia: "ffmpeg",
+    desc: "把 SRT 字幕烧进画面，导出任何平台都能直接播放的硬字幕 MP4，并保留 SRT 文件。",
+    hint: "需要 FFmpeg/ffprobe（含 libass）；会重新编码视频，字幕无法再关闭。",
+  },
+  {
     id: "media-render",
     name: "影音成片",
     category: "production",

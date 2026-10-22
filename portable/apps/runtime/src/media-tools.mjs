@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
 
 // ---------------------------------------------------------------------------
@@ -99,12 +100,15 @@ export function createMediaToolProbe(options = {}) {
 }
 
 // Run one fixed media command. The handler supplies the binary path and the
-// full argument list; nothing here goes through a shell.
+// full argument list; nothing here goes through a shell. `cwd` lets a handler
+// reference a side file (an SRT for the subtitles filter) by plain file name,
+// which avoids escaping drive letters and backslashes inside a filter string.
 export async function runMediaTool({
   command,
   args = [],
   timeoutMs = 120_000,
   maxBuffer = 8 * 1024 * 1024,
+  cwd,
   runner = defaultRunner,
 } = {}) {
   if (typeof command !== "string" || !command.trim()) throw new TypeError("缺少媒体命令");
@@ -112,11 +116,15 @@ export async function runMediaTool({
     throw new TypeError("媒体命令参数必须是字符串数组");
   }
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000) throw new TypeError("媒体命令超时无效");
+  if (cwd !== undefined && (typeof cwd !== "string" || !path.isAbsolute(cwd))) {
+    throw new TypeError("媒体命令工作目录必须是绝对路径");
+  }
   const result = await runner(command, args, {
     timeout: timeoutMs,
     windowsHide: true,
     maxBuffer,
     env: minimalEnv(),
+    ...(cwd ? { cwd } : {}),
   });
   return {
     stdout: String(result?.stdout ?? ""),

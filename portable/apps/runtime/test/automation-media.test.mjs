@@ -11,6 +11,7 @@ import {
   VIDEO_SPECS,
   createAudioExtractHandler,
   createMediaInventoryHandler,
+  createSubtitleBurnHandler,
   createSubtitleMuxHandler,
   createVideoNormalizeHandler,
   createVideoReframeHandler,
@@ -939,6 +940,175 @@ test("subtitle muxing refuses to be built without its dependencies", () => {
   );
   assert.throws(
     () => createSubtitleMuxHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: os.tmpdir(),
+    }),
+    /媒体工具探测/u,
+  );
+});
+
+// --- subtitle burn-in ----------------------------------------------------
+
+function burnHandler({ media, artifacts, runner, mediaProbe = async () => toolsAvailable() }) {
+  return createSubtitleBurnHandler({
+    sourceStore: { list: async () => ({ roots: [media] }) },
+    artifactsDir: artifacts,
+    mediaProbe,
+    runner,
+  });
+}
+
+function burnRunner({ calls = [], duration = "10", withVideo = true, failEncode = false, empty = false } = {}) {
+  return async (command, args, options) => {
+    calls.push({ command, args, options });
+    if (args.includes("-print_format")) {
+      return {
+        stdout: JSON.stringify({
+          format: { duration },
+          streams: withVideo
+            ? [{ codec_type: "video", codec_name: "h264", width: 1280, height: 720 }]
+            : [{ codec_type: "audio", codec_name: "aac" }],
+        }),
+        stderr: "",
+      };
+    }
+    const output = args[args.length - 1];
+    if (failEncode) {
+      await writeFile(output, Buffer.alloc(64, 1));
+      throw new Error("burn failed");
+    }
+    await writeFile(output, Buffer.alloc(empty ? 0 : 4096, 7));
+    return { stdout: "", stderr: "" };
+  };
+}
+
+test("subtitle burning renders the SRT into the picture with the chosen style", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const calls = [];
+    const handler = burnHandler({ media, artifacts, runner: burnRunner({ calls }) });
+
+    const outcome = await handler["media.burn-subtitles"]({
+      run: runLike(),
+      params: { source, subtitles: SAMPLE_SRT },
+    });
+    assert.deepEqual(outcome.artifacts.map((entry) => entry.slot), ["video", "subtitles"]);
+    assert.equal(outcome.artifacts[0].label, "带字幕视频（MP4 / 硬字幕）");
+    assert.equal(outcome.artifacts[0].bytes, 4096);
+    assert.match(outcome.artifacts[0].path, /run_media[\\/]burned\.mp4$/u);
+    assert.match(outcome.logs[1], /字幕 2 条；字号中（24），位置底部/u);
+
+    const encode = calls.find((call) => !call.args.includes("-print_format"));
+    const filter = encode.args[encode.args.indexOf("-vf") + 1];
+    assert.equal(filter,
+      "subtitles=subtitles.srt:force_style='FontSize=24,Alignment=2,MarginV=28,Outline=1,Shadow=0'");
+    // The filter references the SRT by bare name, so ffmpeg runs inside the
+    // artifact directory instead of escaping a Windows path inside the filter.
+    assert.equal(encode.options.cwd, path.join(artifacts, "run_media"));
+    assert.ok(encode.args.includes("libx264"));
+    assert.equal(encode.args[encode.args.length - 1], outcome.artifacts[0].path);
+
+    // The SRT is normalised (CRLF to LF, stable indexes) before burning.
+    const srt = await readFile(outcome.artifacts[1].path, "utf8");
+    assert.equal(srt, formatSrt(parseSrt(SAMPLE_SRT)));
+    assert.equal(srt.includes("\r"), false);
+
+    const styled = await handler["media.burn-subtitles"]({
+      run: { ...runLike(), id: "run_style" },
+      params: { source, subtitles: SAMPLE_SRT, size: "large", position: "top" },
+    });
+    const styledCall = calls.filter((call) => !call.args.includes("-print_format")).at(-1);
+    const styledFilter = styledCall.args[styledCall.args.indexOf("-vf") + 1];
+    assert.match(styledFilter, /FontSize=32,Alignment=8,MarginV=28/u);
+    assert.match(styled.logs[1], /字号大（32），位置顶部/u);
+  });
+});
+
+test("subtitle burning refuses bad style, missing video and over-long subtitles", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    const handler = burnHandler({ media, artifacts, runner: burnRunner() });
+    await assert.rejects(
+      handler["media.burn-subtitles"]({
+        run: runLike(),
+        params: { source, subtitles: SAMPLE_SRT, size: "huge" },
+      }),
+      /字号无效/u,
+    );
+    await assert.rejects(
+      handler["media.burn-subtitles"]({
+        run: runLike(),
+        params: { source, subtitles: SAMPLE_SRT, position: "left" },
+      }),
+      /字幕位置无效/u,
+    );
+
+    const silent = burnHandler({ media, artifacts, runner: burnRunner({ withVideo: false }) });
+    await assert.rejects(
+      silent["media.burn-subtitles"]({ run: runLike(), params: { source, subtitles: SAMPLE_SRT } }),
+      /没有视频轨/u,
+    );
+
+    const short = burnHandler({ media, artifacts, runner: burnRunner({ duration: "1" }) });
+    await assert.rejects(
+      short["media.burn-subtitles"]({ run: runLike(), params: { source, subtitles: SAMPLE_SRT } }),
+      /字幕超出视频时长/u,
+    );
+
+    const noTools = burnHandler({
+      media,
+      artifacts,
+      runner: burnRunner(),
+      mediaProbe: async () => ({
+        ffmpeg: { available: false, path: null, version: null, reason: "未安装" },
+        ffprobe: { available: true, path: FFPROBE, version: "ffprobe", reason: "" },
+      }),
+    });
+    await assert.rejects(
+      noTools["media.burn-subtitles"]({ run: runLike(), params: { source, subtitles: SAMPLE_SRT } }),
+      /未检测到 FFmpeg/u,
+    );
+  });
+});
+
+test("a failed burn removes the SRT and the partial video", async () => {
+  await normalizeFixture(async ({ media, artifacts, source }) => {
+    await assert.rejects(
+      burnHandler({ media, artifacts, runner: burnRunner({ failEncode: true }) })["media.burn-subtitles"]({
+        run: runLike(),
+        params: { source, subtitles: SAMPLE_SRT },
+      }),
+      /字幕烧录失败：burn failed/u,
+    );
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "burned.mp4")), /ENOENT/u);
+    await assert.rejects(readFile(path.join(artifacts, "run_media", "subtitles.srt")), /ENOENT/u);
+
+    const empty = burnHandler({ media, artifacts, runner: burnRunner({ empty: true }) });
+    await assert.rejects(
+      empty["media.burn-subtitles"]({ run: { ...runLike(), id: "run_empty" }, params: { source, subtitles: SAMPLE_SRT } }),
+      /输出文件为空/u,
+    );
+    await assert.rejects(readFile(path.join(artifacts, "run_empty", "burned.mp4")), /ENOENT/u);
+  });
+});
+
+test("subtitle burning refuses to be built without its dependencies", () => {
+  assert.throws(
+    () => createSubtitleBurnHandler({
+      sourceStore: null,
+      artifactsDir: os.tmpdir(),
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /来源配置/u,
+  );
+  assert.throws(
+    () => createSubtitleBurnHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: "relative",
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /产物目录必须是绝对路径/u,
+  );
+  assert.throws(
+    () => createSubtitleBurnHandler({
       sourceStore: { list: async () => ({ roots: [] }) },
       artifactsDir: os.tmpdir(),
     }),
