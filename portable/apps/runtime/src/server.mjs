@@ -28,6 +28,7 @@ import {
   createVideoReframeHandler,
 } from "./automation-media.mjs";
 import { createPublishPackHandler } from "./automation-publish.mjs";
+import { createMidiBreathHandler } from "./automation-midi.mjs";
 import { createPublishReceiptStore } from "./publish-receipts.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
@@ -74,6 +75,8 @@ const ARTIFACT_CONTENT_TYPES = new Map([
   [".mp3", "audio/mpeg"],
   [".wav", "audio/wav"],
   [".srt", "application/x-subrip"],
+  [".mid", "audio/midi"],
+  [".midi", "audio/midi"],
   [".json", "application/json"],
   [".mp4", "video/mp4"],
   [".mov", "video/quicktime"],
@@ -384,6 +387,10 @@ export async function startLocalRuntime(options = {}) {
         runner: options.mediaRun,
       }),
       ...createPublishPackHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+      }),
+      ...createMidiBreathHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
       }),
@@ -1099,10 +1106,15 @@ export async function startLocalRuntime(options = {}) {
     }
     const type = ARTIFACT_CONTENT_TYPES.get(path.extname(absolute).toLowerCase())
       ?? "application/octet-stream";
+    // Chinese artifact names (e.g. `_气口.mid`) are not valid in a plain HTTP
+    // header, so send an ASCII fallback plus the RFC 5987 encoded name.
+    const baseName = path.basename(absolute);
+    const asciiName = baseName.replace(/[^\x20-\x7e]/gu, "_").replace(/["\\]/gu, "_");
     ctx.response.writeHead(200, {
       "content-type": type,
       "content-length": String(info.size),
-      "content-disposition": `attachment; filename="${path.basename(absolute)}"`,
+      "content-disposition":
+        `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(baseName)}`,
       "cache-control": "no-store",
     });
     createReadStream(absolute).pipe(ctx.response);

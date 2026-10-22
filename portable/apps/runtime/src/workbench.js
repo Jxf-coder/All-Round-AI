@@ -2406,11 +2406,16 @@ function renderAutomationBody() {
       row.append(element("span", "automation-step-name", step.name));
       if (stepState.error) row.append(element("span", "device-error", stepState.error));
       for (const artifact of stepState.artifacts ?? []) {
-        row.append(actionButton(
-          `查看${artifact.label || artifact.slot}`,
-          () => void openAutomationArtifact(run.id, artifact.slot),
-        ));
-        if (/\.(m4a|mp3|wav|srt|json|mp4|mov|png|jpe?g)$/iu.test(artifact.path ?? "")) {
+        const artifactPath = artifact.path ?? "";
+        // Text products can be previewed inside the panel; audio, video and
+        // MIDI are binary, so they only get a download button.
+        if (/\.(md|txt|json|srt|csv|lrc|xml|musicxml)$/iu.test(artifactPath)) {
+          row.append(actionButton(
+            `查看${artifact.label || artifact.slot}`,
+            () => void openAutomationArtifact(run.id, artifact.slot),
+          ));
+        }
+        if (/\.(md|txt|json|srt|csv|lrc|xml|musicxml|m4a|mp3|wav|mid|midi|mp4|mov|png|jpe?g)$/iu.test(artifactPath)) {
           const link = element("a", "knowledge-action", `下载${artifact.label || artifact.slot}`);
           link.href = `/api/automation/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.slot)}/download`;
           link.setAttribute("download", "");

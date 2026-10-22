@@ -179,6 +179,16 @@ export const SKILLS = Object.freeze([
     hint: "随阶段 4E 的分发能力一起开放。",
   },
   {
+    id: "midi-breath",
+    name: "MIDI 气口",
+    category: "production",
+    icon: "♬",
+    runner: "app",
+    pipelineId: "midi-breath",
+    desc: "给带词旋律 MIDI 补换气口：拉宽短休止、按句尾与长音切气口、限制乐句长度，并可整体移调。",
+    hint: "纯本机处理，不需要 FFmpeg；只读写 .mid/.midi，不生成音频。",
+  },
+  {
     id: "music-midi",
     name: "音乐 / MIDI",
     category: "production",
@@ -186,7 +196,7 @@ export const SKILLS = Object.freeze([
     runner: "app",
     comingSoon: true,
     desc: "生成 MIDI 片段并导出可编辑的乐谱与音频。",
-    hint: "随阶段 4F 的音乐能力一起开放。",
+    hint: "随阶段 4F 的后续音乐能力一起开放。",
   },
   {
     id: "local-files",

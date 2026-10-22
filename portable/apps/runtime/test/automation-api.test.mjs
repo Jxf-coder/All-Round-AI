@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { startLocalRuntime } from "../src/server.mjs";
+import { parseMidi, writeMidi } from "../src/midi.mjs";
 
 async function boot(options = {}) {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-automation-api-"));
@@ -70,10 +71,11 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 10);
+    assert.equal(body.pipelines.length, 11);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
-        "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "publish-pack"]);
+        "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "midi-breath",
+        "publish-pack"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -769,6 +771,77 @@ test("the subtitle pipeline muxes an SRT and serves both artifacts", async () =>
     const failed = (await bad.json()).run;
     assert.equal(failed.status, "failed");
     assert.match(failed.error, /缺少时间码/u);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the MIDI pipeline marks breaths, transposes and serves the file as audio/midi", async () => {
+  const app = await boot();
+  try {
+    const mediaDir = path.join(app.root, "midi-source");
+    await mkdir(mediaDir, { recursive: true });
+    const source = path.join(mediaDir, "vocal.mid");
+    // Eight syllables with no rests at all; four two-character lyric lines give
+    // the line-end rule enough matches to actually cut.
+    const notes = [
+      { t0: 0, t1: 0.6, pitch: 60, lyric: "只" },
+      { t0: 0.6, t1: 1.2, pitch: 61, lyric: "剩" },
+      { t0: 1.2, t1: 1.8, pitch: 62, lyric: "下" },
+      { t0: 1.8, t1: 2.4, pitch: 63, lyric: "钢" },
+      { t0: 2.4, t1: 3, pitch: 64, lyric: "琴" },
+      { t0: 3, t1: 3.6, pitch: 65, lyric: "陪" },
+      { t0: 3.6, t1: 4.2, pitch: 66, lyric: "我" },
+      { t0: 4.2, t1: 4.8, pitch: 67, lyric: "唱" },
+    ];
+    await writeFile(source, writeMidi({
+      notes,
+      meta: { ticksPerBeat: 480, tempoUs: 500000, timeSignature: { numerator: 4, denominator: 4 } },
+    }));
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [mediaDir] }),
+    });
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "midi-breath",
+        projectId: app.projectId,
+        params: { mark: { source, lyrics: "只剩\n下钢\n琴陪\n我唱", transpose: 2 } },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { run } = await response.json();
+    assert.equal(run.status, "waiting_manual");
+    assert.deepEqual(run.steps.mark.artifacts.map((entry) => entry.slot), ["midi", "report"]);
+
+    const report = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/report`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    const payload = JSON.parse(report.text);
+    assert.equal(payload.notes, 8);
+    assert.equal(payload.transpose, 2);
+    assert.ok(payload.after.n_gap >= payload.before.n_gap);
+    assert.equal(payload.lyrics_source, "text");
+
+    const download = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/midi/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get("content-type"), "audio/midi");
+    const output = Buffer.from(await download.arrayBuffer());
+    assert.equal(output.toString("latin1", 0, 4), "MThd");
+    const parsed = parseMidi(output);
+    assert.deepEqual(parsed.notes.map((note) => note.pitch), [62, 63, 64, 65, 66, 67, 68, 69]);
+    assert.deepEqual(parsed.notes.map((note) => note.lyric),
+      ["只", "剩", "下", "钢", "琴", "陪", "我", "唱"]);
+    // A line-end breath was carved, so the syllables are no longer glued.
+    assert.ok(parsed.notes[1].t1 < parsed.notes[2].t0);
   } finally {
     await app.close();
   }
