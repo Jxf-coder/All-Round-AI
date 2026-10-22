@@ -8,6 +8,7 @@ import {
   RENDER_LIMITS,
   buildCompositeFilter,
   createRenderHandler,
+  parseClipEntries,
   parseClipList,
   renderCanvas,
 } from "../src/automation-render.mjs";
@@ -56,11 +57,39 @@ test("the clip list ignores comments and enforces its bounds", () => {
   assert.throws(() => parseClipList(`C:\\media\\a.mp4\n${"x".repeat(401)}`), /路径过长/u);
 });
 
+test("a clip line can carry an optional trim range", () => {
+  const entries = parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 1.5-6\nC:\\c.mp4 | 2-");
+  assert.deepEqual(entries, [
+    { path: "C:\\a.mp4", start: null, end: null },
+    { path: "C:\\b.mp4", start: 1.5, end: 6 },
+    { path: "C:\\c.mp4", start: 2, end: null },
+  ]);
+  assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 6-1.5"), /裁剪范围无效/u);
+  assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | -"), /裁剪范围无效/u);
+  assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | x-y"), /裁剪范围无效/u);
+});
+
 test("the render canvas maps the three platform ratios", () => {
   assert.deepEqual(renderCanvas("landscape"), { width: 1280, height: 720 });
   assert.deepEqual(renderCanvas("vertical"), { width: 720, height: 1280 });
   assert.deepEqual(renderCanvas("square"), { width: 720, height: 720 });
   assert.throws(() => renderCanvas("wide"), /画布规格无效/u);
+});
+
+test("trims and transition names reach the filter graph", () => {
+  const { filter } = buildCompositeFilter({
+    clips: [
+      { duration: 2, hasAudio: true, start: 1, end: 3 },
+      { duration: 2, hasAudio: false, start: 0.5, end: 2.5 },
+    ],
+    canvas: { width: 720, height: 1280 },
+    transitionSeconds: 0.6,
+    transitionName: "slideleft",
+  });
+  assert.match(filter, /\[0:v\]trim=start=1\.000:end=3\.000,setpts=PTS-STARTPTS,scale=/u);
+  assert.match(filter, /\[0:a\]atrim=start=1\.000:end=3\.000,asetpts=PTS-STARTPTS,aresample/u);
+  assert.match(filter, /\[1:v\]trim=start=0\.500:end=2\.500/u);
+  assert.match(filter, /xfade=transition=slideleft:duration=0\.6:offset=1\.400/u);
 });
 
 test("the composite filter pads, silences and concatenates clips", () => {
@@ -204,6 +233,48 @@ test("the render handler assembles clips, reports the plan and writes both artif
   });
 });
 
+test("the render handler applies trims, honours the transition name and reports effective durations", async () => {
+  await fixture(async ({ media, artifacts }) => {
+    const calls = [];
+    const map = {
+      "a.mp4": { duration: 4, audio: true },
+      "b.mp4": { duration: 3, audio: false },
+    };
+    const handler = renderHandler({ media, artifacts, runner: renderRunner({ calls, map }) });
+    const outcome = await handler["media.render"]({
+      run: runLike("run_trim"),
+      params: {
+        clips: `${path.join(media, "a.mp4")} | 1-3\n${path.join(media, "b.mp4")} | 0-2`,
+        aspect: "landscape",
+        transition: "slide",
+      },
+    });
+
+    assert.match(outcome.logs[0], /2 个片段，合计 0:03/u);
+    const encode = calls.at(-1);
+    const filter = encode.args[encode.args.indexOf("-filter_complex") + 1];
+    assert.match(filter, /\[0:v\]trim=start=1\.000:end=3\.000/u);
+    assert.match(filter, /\[1:v\]trim=start=0\.000:end=2\.000/u);
+    assert.match(filter, /xfade=transition=slideleft:duration=0\.6:offset=1\.400/u);
+
+    const report = JSON.parse(await readFile(outcome.artifacts[1].path, "utf8"));
+    assert.equal(report.clips[0].seconds, 2);
+    assert.deepEqual(report.clips[0].trim, { start: 1, end: 3 });
+    assert.equal(report.clips[1].seconds, 2);
+    assert.equal(report.transition.key, "slide");
+    assert.equal(report.transition.xfade, "slideleft");
+    assert.equal(report.seconds, 3.4);
+
+    await assert.rejects(
+      handler["media.render"]({
+        run: runLike(),
+        params: { clips: `${path.join(media, "a.mp4")} | 1-9\n${path.join(media, "b.mp4")}` },
+      }),
+      /裁剪结束时间超出片段时长/u,
+    );
+  });
+});
+
 test("the render handler refuses unusable clips, styles and music", async () => {
   await fixture(async ({ media, artifacts }) => {
     const map = {
@@ -221,7 +292,7 @@ test("the render handler refuses unusable clips, styles and music", async () => 
       /画布规格无效/u,
     );
     await assert.rejects(
-      handler["media.render"]({ run: runLike(), params: { clips: two, transition: "wipe" } }),
+      handler["media.render"]({ run: runLike(), params: { clips: two, transition: "spin" } }),
       /转场方式无效/u,
     );
     await assert.rejects(

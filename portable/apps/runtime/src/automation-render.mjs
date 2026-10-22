@@ -29,8 +29,10 @@ export const RENDER_ASPECTS = Object.freeze({
 });
 
 export const RENDER_TRANSITIONS = Object.freeze({
-  none: { label: "直接拼接", duration: 0 },
-  crossfade: { label: "淡入淡出", duration: 0.6 },
+  none: { label: "直接拼接", duration: 0, xfade: null },
+  crossfade: { label: "淡入淡出", duration: 0.6, xfade: "fade" },
+  slide: { label: "横向滑动", duration: 0.6, xfade: "slideleft" },
+  wipe: { label: "擦除", duration: 0.6, xfade: "wipeleft" },
 });
 
 function safeRunName(runId) {
@@ -49,22 +51,41 @@ function formatSize(bytes) {
 }
 
 // One absolute path per line; `#` starts a comment so a playlist can be pasted
-// with notes. Two clips are the minimum, because a single clip is a transcode.
-export function parseClipList(input) {
+// with notes. A line may end with `| start-end` (seconds) to cut that clip
+// before assembly. Two clips are the minimum, because one clip is a transcode.
+export function parseClipEntries(input) {
   if (typeof input !== "string" || !input.trim()) throw new Error("片段列表不能为空");
-  const clips = input
+  const lines = input
     .replace(/\r\n?/gu, "\n")
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"));
-  if (clips.length < 2) throw new Error("至少要两个片段才能合成");
-  if (clips.length > RENDER_LIMITS.clips) {
+  if (lines.length < 2) throw new Error("至少要两个片段才能合成");
+  if (lines.length > RENDER_LIMITS.clips) {
     throw new Error(`一次最多合成 ${RENDER_LIMITS.clips} 个片段`);
   }
-  for (const clip of clips) {
-    if (clip.length > RENDER_LIMITS.lineChars) throw new Error("片段路径过长");
-  }
-  return clips;
+  return lines.map((line) => {
+    if (line.length > RENDER_LIMITS.lineChars + 40) throw new Error("片段路径过长");
+    const separator = line.lastIndexOf("|");
+    if (separator === -1) {
+      if (line.length > RENDER_LIMITS.lineChars) throw new Error("片段路径过长");
+      return { path: line, start: null, end: null };
+    }
+    const file = line.slice(0, separator).trim();
+    const range = line.slice(separator + 1).trim();
+    if (!file) throw new Error("片段路径不能为空");
+    if (file.length > RENDER_LIMITS.lineChars) throw new Error("片段路径过长");
+    const match = /^(\d+(?:\.\d+)?)?\s*-\s*(\d+(?:\.\d+)?)?$/u.exec(range);
+    if (!match || (!match[1] && !match[2])) throw new Error(`片段裁剪范围无效：${range}`);
+    const start = match[1] === undefined ? 0 : Number(match[1]);
+    const end = match[2] === undefined ? null : Number(match[2]);
+    if (end !== null && end <= start) throw new Error(`片段裁剪范围无效：${range}`);
+    return { path: file, start, end };
+  });
+}
+
+export function parseClipList(input) {
+  return parseClipEntries(input).map((entry) => entry.path);
 }
 
 export function renderCanvas(aspect) {
@@ -81,20 +102,28 @@ export function buildCompositeFilter({
   clips,
   canvas,
   transitionSeconds = 0,
+  transitionName = "fade",
   hasBgm = false,
   bgmVolume = 25,
 }) {
   if (!Array.isArray(clips) || clips.length < 2) throw new Error("至少要两个片段才能合成");
   const lines = [];
   clips.forEach((clip, index) => {
+    // Trim first so scaling only touches the frames that survive.
+    const trimVideo = clip.start !== null && clip.start !== undefined
+      ? `trim=start=${Number(clip.start).toFixed(3)}:end=${Number(clip.end).toFixed(3)},setpts=PTS-STARTPTS,`
+      : "";
     lines.push(
-      `[${index}:v]scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=decrease,`
+      `[${index}:v]${trimVideo}scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=decrease,`
       + `pad=${canvas.width}:${canvas.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,`
       + `fps=30,format=yuv420p,setpts=PTS-STARTPTS[v${index}]`,
     );
+    const trimAudio = clip.start !== null && clip.start !== undefined
+      ? `atrim=start=${Number(clip.start).toFixed(3)}:end=${Number(clip.end).toFixed(3)},asetpts=PTS-STARTPTS,`
+      : "";
     if (clip.hasAudio) {
       lines.push(
-        `[${index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,`
+        `[${index}:a]${trimAudio}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,`
         + `apad=whole_dur=${clip.duration.toFixed(3)},atrim=0:${clip.duration.toFixed(3)},`
         + `asetpts=PTS-STARTPTS[a${index}]`,
       );
@@ -118,7 +147,7 @@ export function buildCompositeFilter({
       const videoOut = last ? "vcat" : `vx${index}`;
       const audioOut = last ? "acat" : `ax${index}`;
       lines.push(
-        `[${video}][v${index}]xfade=transition=fade:`
+        `[${video}][v${index}]xfade=transition=${transitionName}:`
         + `duration=${transitionSeconds}:offset=${offset.toFixed(3)}[${videoOut}]`,
       );
       lines.push(`[${audio}][a${index}]acrossfade=d=${transitionSeconds}:c1=tri:c2=tri[${audioOut}]`);
@@ -176,16 +205,19 @@ export function createRenderHandler({
         throw new Error("背景音乐音量必须是 0 到 100 之间的数字");
       }
 
-      const paths = parseClipList(params.clips);
+      const entries = parseClipEntries(params.clips);
       const roots = (await sourceStore.list()).roots;
       const clipFiles = [];
-      for (const clip of paths) clipFiles.push(await resolveAllowedFile(clip, roots));
+      for (const entry of entries) {
+        clipFiles.push({ ...entry, file: await resolveAllowedFile(entry.path, roots) });
+      }
       const bgmPath = typeof params.bgm === "string" && params.bgm.trim()
         ? await resolveAllowedFile(params.bgm.trim(), roots)
         : null;
 
       const clips = [];
-      for (const file of clipFiles) {
+      for (const entry of clipFiles) {
+        const file = entry.file;
         let media;
         try {
           media = await probeMediaFile({ ffprobePath: tools.ffprobe.path, filePath: file, runner });
@@ -196,10 +228,20 @@ export function createRenderHandler({
         if (!media.duration || media.duration <= 0.2) {
           throw new Error(`片段时长无效：${path.basename(file)}`);
         }
+        const start = entry.start === null || entry.start === undefined ? 0 : entry.start;
+        const end = entry.end === null || entry.end === undefined ? media.duration : entry.end;
+        if (start < 0 || end <= start) {
+          throw new Error(`片段裁剪范围无效：${path.basename(file)}`);
+        }
+        if (media.duration && end > media.duration + 0.05) {
+          throw new Error(`裁剪结束时间超出片段时长：${path.basename(file)}`);
+        }
         clips.push({
           file,
           name: path.basename(file),
-          duration: media.duration,
+          duration: end - start,
+          start: entry.start === null || entry.start === undefined ? null : start,
+          end: entry.start === null || entry.start === undefined ? null : end,
           hasAudio: Boolean(media.audio),
           width: media.video.width,
           height: media.video.height,
@@ -234,6 +276,7 @@ export function createRenderHandler({
         clips,
         canvas,
         transitionSeconds: transition.duration,
+        transitionName: transition.xfade ?? "fade",
         hasBgm: Boolean(bgm),
         bgmVolume,
       });
@@ -282,12 +325,17 @@ export function createRenderHandler({
           index: index + 1,
           name: clip.name,
           seconds: Number(clip.duration.toFixed(2)),
+          ...(clip.start === null ? {} : { trim: { start: clip.start, end: clip.end } }),
           has_audio: clip.hasAudio,
           width: clip.width,
           height: clip.height,
         })),
         canvas: { ...canvas, aspect },
-        transition: { key: params.transition ?? "none", seconds: transition.duration },
+        transition: {
+          key: params.transition ?? "none",
+          seconds: transition.duration,
+          xfade: transition.xfade ?? null,
+        },
         bgm: bgm
           ? { name: bgm.name, seconds: bgm.duration, volume: bgmVolume }
           : null,

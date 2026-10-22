@@ -602,7 +602,7 @@ export const AUTOMATION_PIPELINES = Object.freeze([
             multiline: true,
             required: true,
             maxLength: 8000,
-            hint: "每行一个白名单内的绝对路径，至少两行；以 # 开头的行会被忽略",
+            hint: "每行一个白名单内的绝对路径，至少两行；可写成「路径 | 起始-结束」（秒）裁剪该片段，例如 C:\\a.mp4 | 1.5-6",
           },
           {
             key: "aspect",
@@ -623,6 +623,8 @@ export const AUTOMATION_PIPELINES = Object.freeze([
             options: [
               { value: "none", label: "直接拼接" },
               { value: "crossfade", label: "淡入淡出" },
+              { value: "slide", label: "横向滑动" },
+              { value: "wipe", label: "擦除" },
             ],
           },
           {
