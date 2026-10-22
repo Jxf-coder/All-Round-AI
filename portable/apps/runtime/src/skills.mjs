@@ -189,6 +189,16 @@ export const SKILLS = Object.freeze([
     hint: "纯本机处理，不需要 FFmpeg；只读写 .mid/.midi，不生成音频。",
   },
   {
+    id: "lyrics-timeline",
+    name: "歌词时间轴",
+    category: "production",
+    icon: "≡",
+    runner: "app",
+    pipelineId: "lyrics-timeline",
+    desc: "把 LRC 歌词规范化为统一时间码，生成同时间轴的 SRT 字幕，可整体前后位移。",
+    hint: "纯文本处理，不需要 FFmpeg；无时间码的行会保留在报告里但不会猜时间。",
+  },
+  {
     id: "music-midi",
     name: "音乐 / MIDI",
     category: "production",

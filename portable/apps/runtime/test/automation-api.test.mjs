@@ -71,11 +71,11 @@ test("automation endpoints require a session and list the built-in pipeline", as
     const listed = await fetch(`${app.runtime.url}/api/automation`, { headers: { cookie: app.member.cookie } });
     assert.equal(listed.status, 200);
     const body = await listed.json();
-    assert.equal(body.pipelines.length, 11);
+    assert.equal(body.pipelines.length, 12);
     assert.deepEqual(body.pipelines.map((pipeline) => pipeline.id),
       ["knowledge-brief", "script-draft", "topic-pack", "script-rewrite", "media-inventory",
         "audio-extract", "video-normalize", "video-reframe", "video-subtitle", "midi-breath",
-        "publish-pack"]);
+        "lyrics-timeline", "publish-pack"]);
     assert.deepEqual(body.pipelines[0].steps.map((step) => step.runner), ["app", "app", "manual"]);
     assert.deepEqual(body.runs, []);
   } finally {
@@ -879,6 +879,83 @@ test("the MIDI pipeline marks breaths, transposes and serves the file as audio/m
       { headers: { cookie: app.admin.cookie } },
     )).arrayBuffer()));
     assert.deepEqual(keyedMidi.notes.map((note) => note.pitch), [51, 52, 53, 54, 55, 56, 57, 58]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the lyrics pipeline normalises LRC and emits SRT on the same timeline", async () => {
+  const app = await boot();
+  try {
+    const sourceDir = path.join(app.root, "lyrics-source");
+    await mkdir(sourceDir, { recursive: true });
+    const source = path.join(sourceDir, "song.lrc");
+    await writeFile(source, "[ti:回家]\n[ar:测试]\n[00:01.50]第一句\n[00:03.00]第二句\n", "utf8");
+    const wrong = path.join(sourceDir, "song.txt");
+    await writeFile(wrong, "[00:01.00]第一句\n", "utf8");
+    await fetch(`${app.runtime.url}/api/knowledge`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({ action: "sourcesSave", roots: [sourceDir] }),
+    });
+
+    const response = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "lyrics-timeline",
+        projectId: app.projectId,
+        params: { convert: { source, shiftMs: 500 } },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { run } = await response.json();
+    assert.equal(run.status, "waiting_manual");
+    assert.deepEqual(run.steps.convert.artifacts.map((entry) => entry.slot), ["lrc", "srt", "report"]);
+
+    const lrc = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/lrc`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(lrc.text, /^\[ti:回家\]/u);
+    assert.match(lrc.text, /\[00:02\.00\]第一句/u);
+    assert.equal(lrc.text.includes("[offset:"), false);
+
+    const srt = await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/srt`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json();
+    assert.match(srt.text, /^1\n00:00:02,000 --> 00:00:03,300\n第一句/u);
+
+    const report = JSON.parse((await (await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/report`,
+      { headers: { cookie: app.admin.cookie } },
+    )).json()).text);
+    assert.equal(report.lines, 2);
+    assert.equal(report.shift_ms, 500);
+    assert.equal(report.first_ms, 2_000);
+    assert.equal(report.last_ms, 3_500);
+
+    const download = await fetch(
+      `${app.runtime.url}/api/automation/runs/${run.id}/artifacts/srt/download`,
+      { headers: { cookie: app.admin.cookie } },
+    );
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get("content-type"), "application/x-subrip");
+
+    const rejected = await fetch(`${app.runtime.url}/api/automation/runs`, {
+      method: "POST",
+      headers: app.admin,
+      body: JSON.stringify({
+        pipelineId: "lyrics-timeline",
+        projectId: app.projectId,
+        params: { convert: { source: wrong, shiftMs: 0 } },
+      }),
+    });
+    assert.equal(rejected.status, 201);
+    const failed = (await rejected.json()).run;
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /\.lrc/u);
   } finally {
     await app.close();
   }

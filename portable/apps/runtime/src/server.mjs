@@ -29,6 +29,7 @@ import {
 } from "./automation-media.mjs";
 import { createPublishPackHandler } from "./automation-publish.mjs";
 import { createMidiBreathHandler } from "./automation-midi.mjs";
+import { createLyricsTimelineHandler } from "./automation-lyrics.mjs";
 import { createPublishReceiptStore } from "./publish-receipts.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
@@ -75,6 +76,7 @@ const ARTIFACT_CONTENT_TYPES = new Map([
   [".mp3", "audio/mpeg"],
   [".wav", "audio/wav"],
   [".srt", "application/x-subrip"],
+  [".lrc", "text/plain; charset=utf-8"],
   [".mid", "audio/midi"],
   [".midi", "audio/midi"],
   [".json", "application/json"],
@@ -391,6 +393,10 @@ export async function startLocalRuntime(options = {}) {
         artifactsDir: automationArtifacts,
       }),
       ...createMidiBreathHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+      }),
+      ...createLyricsTimelineHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
       }),

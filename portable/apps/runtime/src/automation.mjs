@@ -616,6 +616,52 @@ export const AUTOMATION_PIPELINES = Object.freeze([
     ],
   },
   {
+    id: "lyrics-timeline",
+    name: "歌词时间轴",
+    desc: "把 LRC 歌词规范化为统一时间码，并按同一时间轴生成 SRT 字幕，可整体前后位移。纯文本处理，不需要 FFmpeg。",
+    steps: [
+      {
+        id: "convert",
+        name: "整理时间轴",
+        runner: "app",
+        desc: "解析 LRC 元信息与多时间戳，应用位移，再输出规范 LRC、SRT 与时间轴报告。",
+        action: "lyrics.timeline",
+        outputs: [
+          { slot: "lrc", label: "歌词（LRC）" },
+          { slot: "srt", label: "字幕（SRT）" },
+          { slot: "report", label: "时间轴报告（JSON）" },
+        ],
+        params: [
+          {
+            key: "source",
+            label: "LRC 文件",
+            type: "text",
+            required: true,
+            maxLength: 400,
+            hint: "必须是「来源配置」白名单内的 .lrc 文件",
+          },
+          {
+            key: "shiftMs",
+            label: "整体位移（毫秒）",
+            type: "number",
+            default: 0,
+            min: -60_000,
+            max: 60_000,
+            hint: "正数延后、负数提前；同时作用于 LRC 与 SRT",
+          },
+        ],
+      },
+      {
+        id: "review",
+        name: "人工确认",
+        runner: "manual",
+        desc: "校对首尾时间与字幕断句后结束本次运行。",
+        after: ["convert"],
+        manualHint: "核对首尾时间与断句后点击「我做完了」",
+      },
+    ],
+  },
+  {
     id: "publish-pack",
     name: "发布包",
     desc: "把成片的标题、文案与平台检查项整理成发布清单和 JSON；不调用任何平台接口，由人工发布后回填回执。",
