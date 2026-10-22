@@ -33,7 +33,7 @@ import { createMidiBreathHandler } from "./automation-midi.mjs";
 import { createLyricsTimelineHandler } from "./automation-lyrics.mjs";
 import { createMusicXmlHandler } from "./automation-musicxml.mjs";
 import { createRenderHandler } from "./automation-render.mjs";
-import { createAsrHandler, createAsrProbe } from "./asr.mjs";
+import { createAsrBatchHandler, createAsrHandler, createAsrProbe } from "./asr.mjs";
 import { createPublishReceiptStore } from "./publish-receipts.mjs";
 import { createMediaToolProbe } from "./media-tools.mjs";
 import { loadOrCreateMasterKey } from "./master-key.mjs";
@@ -81,6 +81,7 @@ const ARTIFACT_CONTENT_TYPES = new Map([
   [".wav", "audio/wav"],
   [".srt", "application/x-subrip"],
   [".lrc", "text/plain; charset=utf-8"],
+  [".md", "text/markdown; charset=utf-8"],
   [".mid", "audio/midi"],
   [".midi", "audio/midi"],
   [".musicxml", "application/vnd.recordare.musicxml+xml"],
@@ -411,6 +412,16 @@ export async function startLocalRuntime(options = {}) {
         runner: options.mediaRun,
       }),
       ...createAsrHandler({
+        sourceStore,
+        artifactsDir: automationArtifacts,
+        mediaProbe,
+        runner: options.mediaRun,
+        pythonRunner: options.pythonRun,
+        pythonPath: options.pythonPath,
+        modelPath: options.whisperModel,
+        env,
+      }),
+      ...createAsrBatchHandler({
         sourceStore,
         artifactsDir: automationArtifacts,
         mediaProbe,

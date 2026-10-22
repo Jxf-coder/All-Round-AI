@@ -64,6 +64,8 @@ test("the catalog lists implemented capabilities and keeps later phases visible"
     assert.equal(skills.get("asr-subtitle").enabled, true);
     assert.equal(skills.get("asr-subtitle").available, false);
     assert.match(skills.get("asr-subtitle").reason, /FFmpeg/);
+    assert.equal(skills.get("asr-batch").enabled, true);
+    assert.equal(skills.get("asr-batch").available, false);
     // With FFmpeg present the next gate is the local recognizer itself.
     const mediaReady = byId(await fixture.store.list([], {
       media: { ffmpeg: { available: true } },
@@ -73,7 +75,7 @@ test("the catalog lists implemented capabilities and keeps later phases visible"
     assert.match(mediaReady.get("asr-subtitle").reason, /faster-whisper/u);
     assert.equal(skills.get("publish-pack").enabled, true);
     assert.equal(skills.get("publish-pack").available, true);
-    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 22, available: 12, comingSoon: 3 });
+    assert.deepEqual(listed.stats, { total: SKILLS.length, enabled: 23, available: 12, comingSoon: 3 });
   } finally {
     await fixture.close();
   }

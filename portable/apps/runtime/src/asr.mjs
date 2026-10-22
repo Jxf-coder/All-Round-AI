@@ -3,9 +3,9 @@ import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { formatSrt } from "./automation-media.mjs";
+import { formatSrt, mediaKindOf, scanMediaDirectory } from "./automation-media.mjs";
 import { probeMediaFile, runMediaTool } from "./media-tools.mjs";
-import { resolveAllowedFile } from "./sources.mjs";
+import { resolveAllowedFile, resolveScoutRoot } from "./sources.mjs";
 
 // ---------------------------------------------------------------------------
 // Speech to subtitles.
@@ -236,6 +236,67 @@ export function createAsrProbe({
   };
 }
 
+async function extractWav({ tools, source, wavFile, runner }) {
+  try {
+    await runMediaTool({
+      command: tools.ffmpeg.path,
+      args: [
+        "-hide_banner", "-nostdin", "-y",
+        "-i", source,
+        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+        wavFile,
+      ],
+      timeoutMs: 180_000,
+      runner,
+    });
+  } catch (error) {
+    const detail = String(error?.message ?? "未知错误").split(/\r?\n/u)[0].slice(0, 300);
+    throw new Error(`提取音频失败：${detail}`);
+  }
+}
+
+async function recognize({
+  wavFile,
+  duration,
+  language,
+  useVad,
+  runPython,
+  python,
+  model,
+  workerPath,
+  env,
+  directory,
+}) {
+  const timeoutMs = duration
+    ? Math.min(Math.max(Math.ceil(duration * 1_500), 120_000), 2_700_000)
+    : 600_000;
+  const output = await runPython({
+    command: python,
+    args: [workerPath],
+    input: JSON.stringify({
+      audio: wavFile,
+      model,
+      language: language.code ?? "auto",
+      // The reference disables VAD on short clips because it can swallow the
+      // only speech; keep that guard here.
+      vad: useVad,
+      words: true,
+    }),
+    timeoutMs,
+    cwd: directory,
+    env: pythonEnv(env, model),
+  });
+  const result = parseSidecarOutput(output.stdout);
+  return { result, cues: buildCues(result.segments) };
+}
+
+function countWords(segments) {
+  return segments.reduce(
+    (sum, segment) => sum + (Array.isArray(segment.words) ? segment.words.length : 0),
+    0,
+  );
+}
+
 export function createAsrHandler({
   sourceStore,
   artifactsDir,
@@ -287,60 +348,33 @@ export function createAsrHandler({
       const transcriptFile = path.join(directory, "transcript.json");
       await Promise.all([srtFile, transcriptFile, wavFile].map((file) => rm(file, { force: true }).catch(() => {})));
 
-      const timeoutMs = media.duration
-        ? Math.min(Math.max(Math.ceil(media.duration * 1_500), 120_000), 2_700_000)
-        : 600_000;
-      try {
-        await runMediaTool({
-          command: tools.ffmpeg.path,
-          args: [
-            "-hide_banner", "-nostdin", "-y",
-            "-i", source,
-            "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-            wavFile,
-          ],
-          timeoutMs: 180_000,
-          runner,
-        });
-      } catch (error) {
-        const detail = String(error?.message ?? "未知错误").split(/\r?\n/u)[0].slice(0, 300);
-        throw new Error(`提取音频失败：${detail}`);
-      }
-
       let result;
+      let cues;
       try {
-        const output = await runPython({
-          command: python,
-          args: [workerPath],
-          input: JSON.stringify({
-            audio: wavFile,
-            model,
-            language: language.code ?? "auto",
-            // The reference disables VAD on short clips because it can swallow
-            // the only speech; keep that guard here.
-            vad: params.vad !== false && (!media.duration || media.duration >= 15),
-            words: true,
-          }),
-          timeoutMs,
-          cwd: directory,
-          env: pythonEnv(env, model),
-        });
-        result = parseSidecarOutput(output.stdout);
+        await extractWav({ tools, source, wavFile, runner });
+        ({ result, cues } = await recognize({
+          wavFile,
+          duration: media.duration,
+          language,
+          useVad: params.vad !== false && (!media.duration || media.duration >= 15),
+          runPython,
+          python,
+          model,
+          workerPath,
+          env,
+          directory,
+        }));
       } catch (error) {
         await Promise.all([wavFile, srtFile, transcriptFile].map((file) => rm(file, { force: true }).catch(() => {})));
         throw error;
       }
 
-      const cues = buildCues(result.segments);
       if (!cues.length) {
         await rm(wavFile, { force: true }).catch(() => {});
         throw new Error("没有识别出可用的字幕（音频可能是静音）");
       }
       const srt = formatSrt(cues);
-      const wordCount = result.segments.reduce(
-        (sum, segment) => sum + (Array.isArray(segment.words) ? segment.words.length : 0),
-        0,
-      );
+      const wordCount = countWords(result.segments);
       const transcript = {
         engine: result.engine ?? null,
         language: result.language ?? language.code ?? "auto",
@@ -383,3 +417,202 @@ export function createAsrHandler({
     },
   });
 }
+
+export const ASR_BATCH_LIMITS = Object.freeze({ files: 12 });
+
+// Batch mode: scan one allowed directory, transcribe what actually has an audio
+// track and keep going when a single file fails. One broken file must not throw
+// away the subtitles already produced for the others; the run only fails when
+// nothing succeeded.
+export function createAsrBatchHandler({
+  sourceStore,
+  artifactsDir,
+  mediaProbe,
+  runner,
+  pythonRunner,
+  pythonPath,
+  modelPath,
+  workerPath = WORKER_PATH,
+  env = process.env,
+} = {}) {
+  if (!sourceStore || typeof sourceStore.list !== "function") {
+    throw new TypeError("批量转字幕需要来源配置");
+  }
+  if (typeof artifactsDir !== "string" || !path.isAbsolute(artifactsDir)) {
+    throw new TypeError("产物目录必须是绝对路径");
+  }
+  if (typeof mediaProbe !== "function") throw new TypeError("批量转字幕需要媒体工具探测");
+  const python = pythonPath ?? (env.ALLROUND_AI_PYTHON?.trim() || "python");
+  const model = modelPath ?? (env.ALLROUND_AI_WHISPER_MODEL?.trim() || "");
+  const runPython = pythonRunner ?? createPythonRunner();
+
+  return Object.freeze({
+    "media.transcribe-batch": async ({ run, params }) => {
+      const tools = await mediaProbe();
+      if (!tools?.ffmpeg?.available || !tools?.ffprobe?.available) {
+        throw new Error("未检测到 FFmpeg/ffprobe，请安装后重试（或设置 FFMPEG_PATH/FFPROBE_PATH）");
+      }
+      const language = ASR_LANGUAGES[params.language ?? "auto"];
+      if (!language) throw new Error("识别语言无效");
+      const requested = Number(params.maxFiles ?? 5);
+      if (!Number.isSafeInteger(requested) || requested < 1 || requested > ASR_BATCH_LIMITS.files) {
+        throw new Error(`文件数必须是 1 到 ${ASR_BATCH_LIMITS.files} 之间的整数`);
+      }
+
+      const roots = (await sourceStore.list()).roots;
+      const root = await resolveScoutRoot(params.root, roots);
+      const [videos, audios] = await Promise.all([
+        scanMediaDirectory({ root, kinds: "video", maxFiles: requested }),
+        scanMediaDirectory({ root, kinds: "audio", maxFiles: requested }),
+      ]);
+      const candidates = [...videos.files, ...audios.files]
+        .filter((entry) => ["audio", "video"].includes(entry.kind ?? mediaKindOf(entry.path)))
+        .sort((left, right) => left.path.localeCompare(right.path))
+        .slice(0, requested);
+      if (!candidates.length) throw new Error("目录里没有音频或视频文件");
+
+      const baseDirectory = path.join(artifactsDir, safeRunName(run.id));
+      await mkdir(baseDirectory, { recursive: true });
+      const startedAt = Date.now();
+      const results = [];
+      const artifacts = [];
+
+      for (const [index, entry] of candidates.entries()) {
+        const label = path.basename(entry.path);
+        const source = await resolveAllowedFile(path.join(root, ...entry.path.split("/")), roots);
+        let media;
+        try {
+          media = await probeMediaFile({ ffprobePath: tools.ffprobe.path, filePath: source, runner });
+        } catch (error) {
+          results.push({ name: label, path: entry.path, status: "failed", error: `无法读取媒体信息：${error.message}` });
+          continue;
+        }
+        if (!media.audio) {
+          results.push({ name: label, path: entry.path, status: "skipped", error: "没有音频轨" });
+          continue;
+        }
+
+        const stem = path.basename(entry.path, path.extname(entry.path))
+          .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+          .slice(0, 40) || "clip";
+        const directory = path.join(baseDirectory, `${String(index + 1).padStart(2, "0")}-${stem}`);
+        const wavFile = path.join(directory, "audio.wav");
+        const srtFile = path.join(directory, "captions.srt");
+        await mkdir(directory, { recursive: true });
+        await Promise.all([wavFile, srtFile].map((file) => rm(file, { force: true }).catch(() => {})));
+
+        try {
+          await extractWav({ tools, source, wavFile, runner });
+          const { result, cues } = await recognize({
+            wavFile,
+            duration: media.duration,
+            language,
+            useVad: params.vad !== false && (!media.duration || media.duration >= 15),
+            runPython,
+            python,
+            model,
+            workerPath,
+            env,
+            directory,
+          });
+          if (!cues.length) throw new Error("没有识别出可用的字幕（音频可能是静音）");
+          const srt = formatSrt(cues);
+          await writeFile(srtFile, srt, { encoding: "utf8", mode: 0o600 });
+          await rm(wavFile, { force: true }).catch(() => {});
+          artifacts.push({
+            slot: `subtitles-${index + 1}`,
+            label: `字幕：${label}`,
+            path: srtFile,
+            bytes: Buffer.byteLength(srt, "utf8"),
+          });
+          results.push({
+            name: label,
+            path: entry.path,
+            status: "ok",
+            seconds: Number((media.duration ?? result.duration ?? 0).toFixed(2)),
+            cues: cues.length,
+            language: result.language ?? null,
+            engine: result.engine ?? null,
+            words: countWords(result.segments),
+            segments: result.segments,
+          });
+        } catch (error) {
+          await Promise.all([wavFile, srtFile].map((file) => rm(file, { force: true }).catch(() => {})));
+          results.push({
+            name: label,
+            path: entry.path,
+            status: "failed",
+            error: String(error?.message ?? "未知错误").slice(0, 300),
+          });
+        }
+      }
+
+      const ok = results.filter((entry) => entry.status === "ok");
+      if (!ok.length) {
+        const detail = results.map((entry) => `${entry.name}：${entry.error}`).join("；").slice(0, 300);
+        throw new Error(`没有任何文件识别成功（${detail}）`);
+      }
+
+      const summary = {
+        root,
+        language: params.language ?? "auto",
+        files: results,
+        counts: {
+          ok: ok.length,
+          skipped: results.filter((entry) => entry.status === "skipped").length,
+          failed: results.filter((entry) => entry.status === "failed").length,
+        },
+        totalCues: ok.reduce((sum, entry) => sum + entry.cues, 0),
+        elapsed: Number(((Date.now() - startedAt) / 1_000).toFixed(1)),
+      };
+      const reportJson = path.join(baseDirectory, "batch-report.json");
+      const reportMarkdown = path.join(baseDirectory, "batch-report.md");
+      const jsonText = `${JSON.stringify(summary, null, 2)}\n`;
+      const lines = [
+        "# 批量转字幕报告",
+        "",
+        `- 目录：${root}`,
+        `- 结果：成功 ${summary.counts.ok}、跳过 ${summary.counts.skipped}、失败 ${summary.counts.failed}`,
+        `- 合计字幕：${summary.totalCues} 条；用时 ${summary.elapsed} 秒`,
+        "",
+        "| 文件 | 状态 | 时长 | 字幕 | 说明 |",
+        "| --- | --- | --- | --- | --- |",
+        ...results.map((entry) => `| ${entry.path} | ${entry.status} | `
+          + `${entry.seconds === undefined ? "-" : `${entry.seconds} 秒`} | `
+          + `${entry.cues ?? "-"} | ${entry.error ?? ""} |`),
+        "",
+      ];
+      const markdownText = lines.join("\n");
+      try {
+        await writeFile(reportJson, jsonText, { encoding: "utf8", mode: 0o600 });
+        await writeFile(reportMarkdown, markdownText, { encoding: "utf8", mode: 0o600 });
+      } catch (error) {
+        throw new Error(`写入批量报告失败：${error.message}`);
+      }
+      artifacts.push(
+        {
+          slot: "report-json",
+          label: "批量报告（JSON）",
+          path: reportJson,
+          bytes: Buffer.byteLength(jsonText, "utf8"),
+        },
+        {
+          slot: "report-markdown",
+          label: "批量报告（Markdown）",
+          path: reportMarkdown,
+          bytes: Buffer.byteLength(markdownText, "utf8"),
+        },
+      );
+
+      return {
+        artifacts,
+        logs: [
+          `目录：${root}，处理 ${results.length} 个文件`,
+          `成功 ${summary.counts.ok}、跳过 ${summary.counts.skipped}、失败 ${summary.counts.failed}；合计 ${summary.totalCues} 条字幕`,
+          `用时 ${summary.elapsed} 秒`,
+        ],
+      };
+    },
+  });
+}
+

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   buildCues,
+  createAsrBatchHandler,
   createAsrHandler,
   createAsrProbe,
   parseSidecarOutput,
@@ -340,6 +341,184 @@ test("the ASR handler refuses to be built without its dependencies", () => {
       sourceStore: { list: async () => ({ roots: [] }) },
       artifactsDir: os.tmpdir(),
     }),
+    /媒体工具探测/u,
+  );
+});
+
+// --- batch transcription -------------------------------------------------
+
+async function batchFixture(callback) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "allround-asr-batch-"));
+  const media = path.join(root, "media");
+  const artifacts = path.join(root, "artifacts");
+  const model = path.join(root, "model");
+  await mkdir(media, { recursive: true });
+  await mkdir(model, { recursive: true });
+  try {
+    await callback({ root, media, artifacts, model });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+function batchMediaRunner({ calls = [] } = {}) {
+  return async (command, args, options) => {
+    calls.push({ command, args, options });
+    if (args.includes("-print_format")) {
+      const name = path.basename(args[args.length - 1]);
+      if (name === "broken.mp4") throw new Error("probe exploded");
+      const duration = name === "a.mp4" ? "20" : "8";
+      return {
+        stdout: JSON.stringify({
+          format: { format_name: "mov,mp4", duration },
+          streams: [
+            ...(name === "c.mp3" ? [] : [{ codec_type: "video", codec_name: "h264" }]),
+            ...(name === "b.mp4" ? [] : [{ codec_type: "audio", codec_name: "aac" }]),
+          ],
+        }),
+        stderr: "",
+      };
+    }
+    await writeFile(args[args.length - 1], Buffer.alloc(1024, 1));
+    return { stdout: "", stderr: "" };
+  };
+}
+
+function batchPythonRunner({ calls = [] } = {}) {
+  return async (options) => {
+    calls.push(options);
+    // The second audio file fails, proving one bad file does not abort the run.
+    if (calls.length === 2) {
+      return { stdout: '{"ok":false,"error":"decode error"}\n', stderr: "", code: 0 };
+    }
+    return {
+      stdout: `${JSON.stringify({ ...SIDECAR_OK, duration: 8 })}\n`,
+      stderr: "",
+      code: 0,
+    };
+  };
+}
+
+function batchHandler({ media, artifacts, model, mediaRun, pythonRun }) {
+  return createAsrBatchHandler({
+    sourceStore: { list: async () => ({ roots: [media] }) },
+    artifactsDir: artifacts,
+    mediaProbe: async () => toolsAvailable(),
+    runner: mediaRun,
+    pythonRunner: pythonRun,
+    pythonPath: "python",
+    modelPath: model,
+    env: {},
+  });
+}
+
+test("batch transcription keeps going when a file is skipped or fails", async () => {
+  await batchFixture(async ({ media, artifacts, model }) => {
+    for (const name of ["a.mp4", "b.mp4", "broken.mp4", "c.mp3"]) {
+      await writeFile(path.join(media, name), Buffer.alloc(64, 1));
+    }
+    const outcome = await batchHandler({
+      media,
+      artifacts,
+      model,
+      mediaRun: batchMediaRunner(),
+      pythonRun: batchPythonRunner(),
+    })["media.transcribe-batch"]({
+      run: runLike("run_batch"),
+      params: { root: media, language: "zh", maxFiles: 5 },
+    });
+
+    assert.deepEqual(outcome.artifacts.map((entry) => entry.slot),
+      ["subtitles-1", "report-json", "report-markdown"]);
+    assert.equal(outcome.artifacts[0].label, "字幕：a.mp4");
+    assert.match(outcome.logs[1], /成功 1、跳过 1、失败 2/u);
+
+    const report = JSON.parse(await readFile(outcome.artifacts[1].path, "utf8"));
+    assert.deepEqual(report.counts, { ok: 1, skipped: 1, failed: 2 });
+    const byName = new Map(report.files.map((entry) => [entry.name, entry]));
+    assert.equal(byName.get("a.mp4").status, "ok");
+    assert.equal(byName.get("b.mp4").status, "skipped");
+    assert.match(byName.get("b.mp4").error, /没有音频轨/u);
+    assert.equal(byName.get("broken.mp4").status, "failed");
+    assert.match(byName.get("broken.mp4").error, /无法读取媒体信息/u);
+    assert.equal(byName.get("c.mp3").status, "failed");
+    assert.match(byName.get("c.mp3").error, /decode error/u);
+    assert.equal(report.totalCues, 2);
+
+    const markdown = await readFile(outcome.artifacts[2].path, "utf8");
+    assert.match(markdown, /# 批量转字幕报告/u);
+    assert.match(markdown, /\| a\.mp4 \| ok \|/u);
+    assert.match(markdown, /\| c\.mp3 \| failed \|/u);
+
+    // Per-file folders only keep the SRT; the intermediate WAV is gone.
+    await assert.rejects(stat(path.join(artifacts, "run_batch", "01-a", "audio.wav")), /ENOENT/u);
+    assert.match(await readFile(path.join(artifacts, "run_batch", "01-a", "captions.srt"), "utf8"),
+      /第一句话/u);
+  });
+});
+
+test("batch transcription refuses empty folders, bad limits and all-failure runs", async () => {
+  await batchFixture(async ({ media, artifacts, model }) => {
+    const empty = path.join(media, "empty");
+    await mkdir(empty, { recursive: true });
+    const handler = batchHandler({
+      media,
+      artifacts,
+      model,
+      mediaRun: batchMediaRunner(),
+      pythonRun: batchPythonRunner(),
+    });
+    await assert.rejects(
+      handler["media.transcribe-batch"]({ run: runLike(), params: { root: empty } }),
+      /没有音频或视频文件/u,
+    );
+    await assert.rejects(
+      handler["media.transcribe-batch"]({ run: runLike(), params: { root: media, maxFiles: 20 } }),
+      /文件数必须是 1 到 12/u,
+    );
+
+    await writeFile(path.join(media, "silent.mp4"), Buffer.alloc(64, 1));
+    const silentOnly = batchHandler({
+      media,
+      artifacts,
+      model,
+      mediaRun: async (command, args) => {
+        if (args.includes("-print_format")) {
+          return {
+            stdout: JSON.stringify({
+              format: { duration: "4" },
+              streams: [{ codec_type: "video", codec_name: "h264" }],
+            }),
+            stderr: "",
+          };
+        }
+        await writeFile(args[args.length - 1], Buffer.alloc(64, 1));
+        return { stdout: "", stderr: "" };
+      },
+      pythonRun: batchPythonRunner(),
+    });
+    await assert.rejects(
+      silentOnly["media.transcribe-batch"]({ run: runLike("run_silent"), params: { root: media } }),
+      /没有任何文件识别成功/u,
+    );
+  });
+});
+
+test("the batch handler refuses to be built without its dependencies", () => {
+  assert.throws(
+    () => createAsrBatchHandler({ sourceStore: null, artifactsDir: os.tmpdir(), mediaProbe: async () => toolsAvailable() }),
+    /来源配置/u,
+  );
+  assert.throws(
+    () => createAsrBatchHandler({
+      sourceStore: { list: async () => ({ roots: [] }) },
+      artifactsDir: "relative",
+      mediaProbe: async () => toolsAvailable(),
+    }),
+    /产物目录必须是绝对路径/u,
+  );
+  assert.throws(
+    () => createAsrBatchHandler({ sourceStore: { list: async () => ({ roots: [] }) }, artifactsDir: os.tmpdir() }),
     /媒体工具探测/u,
   );
 });

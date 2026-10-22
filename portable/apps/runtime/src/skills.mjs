@@ -172,6 +172,18 @@ export const SKILLS = Object.freeze([
     hint: "需要 FFmpeg/ffprobe 与本机 Python + faster-whisper；设置 ALLROUND_AI_PYTHON 与 ALLROUND_AI_WHISPER_MODEL。",
   },
   {
+    id: "asr-batch",
+    name: "批量转字幕",
+    category: "production",
+    icon: "⧉",
+    runner: "app",
+    pipelineId: "asr-batch",
+    requiresMedia: "ffmpeg",
+    requiresAsr: true,
+    desc: "扫描白名单内的一个目录，把音频与视频逐个转成 SRT，并汇总成功、跳过与失败。",
+    hint: "需要 FFmpeg 与本机 Python + faster-whisper；单个文件失败不会中断整批。",
+  },
+  {
     id: "media-render",
     name: "影音成片",
     category: "production",
