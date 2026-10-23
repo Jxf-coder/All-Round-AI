@@ -54,6 +54,7 @@ import {
 } from "./distill.mjs";
 import { createMockAiProvider } from "./ai/mock-provider.mjs";
 import { createOllamaProvider } from "./ai/ollama-provider.mjs";
+import { createDeepseekProvider } from "./ai/deepseek-provider.mjs";
 import { createAiSettings } from "./ai/settings.mjs";
 import { selectContextMessages } from "./ai/context.mjs";
 import { TERMINAL_TURN_STATUSES, createTurnManager } from "./ai/turns.mjs";
@@ -241,12 +242,33 @@ export async function startLocalRuntime(options = {}) {
       void recordAudit(event);
     },
   });
+  // Settings hold the chosen model plus a provider credential, so they go
+  // through the encrypting config store backed by a per-installation key.
+  // Created before the providers because the DeepSeek adapter resolves its key
+  // from this store on every request.
+  const configStore = options.configStore ?? await createConfigStore(
+    path.join(directories.config, "settings.json"),
+    { masterKey: await loadOrCreateMasterKey(path.join(directories.config, "master-key.json")) },
+  );
   // Engines are providers. The registry keeps the switch honest: the default
   // provider owns the installation-wide model setting, while any additional
   // engine runs on its first advertised model until it gains its own settings.
-  // Ollama is opt-in: without a URL the install stays on the mock and never
-  // waits for a local service that may not exist.
+  // Ollama and DeepSeek are opt-in: without a URL or key the install stays on
+  // the mock and never waits on a service that may not exist.
   const ollamaUrl = options.ollamaUrl ?? env.ALLROUND_AI_OLLAMA_URL ?? env.OLLAMA_HOST;
+  const deepseekKey = options.deepseekKey ?? env.ALLROUND_AI_DEEPSEEK_KEY;
+  const deepseekUrl = options.deepseekUrl ?? env.ALLROUND_AI_DEEPSEEK_URL;
+  // A key saved through the settings screen wins over the environment, so an
+  // operator can rotate it without editing the service definition.
+  const storedDeepseekKey = async () => {
+    let stored = "";
+    try {
+      stored = await configStore.getSecret("ai.apiKey");
+    } catch {
+      stored = "";
+    }
+    return stored || (typeof deepseekKey === "string" ? deepseekKey : "");
+  };
   let configuredProviders;
   if (options.aiProviders) {
     configuredProviders = options.aiProviders;
@@ -257,18 +279,15 @@ export async function startLocalRuntime(options = {}) {
     if (typeof ollamaUrl === "string" && ollamaUrl.trim()) {
       configuredProviders.push(createOllamaProvider({ baseUrl: ollamaUrl }));
     }
+    if (typeof deepseekKey === "string" && deepseekKey.trim()) {
+      configuredProviders.push(createDeepseekProvider({ apiKey: storedDeepseekKey, baseUrl: deepseekUrl }));
+    }
   }
   const providerRegistry = options.providerRegistry ?? createProviderRegistry({
     providers: configuredProviders,
     defaultId: options.defaultEngine ?? env.ALLROUND_AI_ENGINE,
   });
   const defaultProvider = providerRegistry.get(providerRegistry.defaultId);
-  // Settings hold the chosen model plus a provider credential, so they go
-  // through the encrypting config store backed by a per-installation key.
-  const configStore = options.configStore ?? await createConfigStore(
-    path.join(directories.config, "settings.json"),
-    { masterKey: await loadOrCreateMasterKey(path.join(directories.config, "master-key.json")) },
-  );
   const aiSettings = options.aiSettings ?? createAiSettings({ configStore, provider: defaultProvider });
   const conversationStore = options.conversationStore
     ?? await createConversationStore(path.join(directories.config, "conversations.json"));
