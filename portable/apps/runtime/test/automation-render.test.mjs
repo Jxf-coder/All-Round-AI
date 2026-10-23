@@ -60,13 +60,45 @@ test("the clip list ignores comments and enforces its bounds", () => {
 test("a clip line can carry an optional trim range", () => {
   const entries = parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 1.5-6\nC:\\c.mp4 | 2-");
   assert.deepEqual(entries, [
-    { path: "C:\\a.mp4", start: null, end: null },
-    { path: "C:\\b.mp4", start: 1.5, end: 6 },
-    { path: "C:\\c.mp4", start: 2, end: null },
+    { path: "C:\\a.mp4", start: null, end: null, speed: null },
+    { path: "C:\\b.mp4", start: 1.5, end: 6, speed: null },
+    { path: "C:\\c.mp4", start: 2, end: null, speed: null },
   ]);
   assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 6-1.5"), /裁剪范围无效/u);
   assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | -"), /裁剪范围无效/u);
   assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | x-y"), /裁剪范围无效/u);
+});
+
+test("a clip line can carry a speed after the trim range", () => {
+  const entries = parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 1-3 | 1.5x\nC:\\c.mp4 |  | 0.5");
+  assert.deepEqual(entries, [
+    { path: "C:\\a.mp4", start: null, end: null, speed: null },
+    { path: "C:\\b.mp4", start: 1, end: 3, speed: 1.5 },
+    { path: "C:\\c.mp4", start: null, end: null, speed: 0.5 },
+  ]);
+  assert.equal(parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 1-3 | 1x")[1].speed, 1);
+  assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 1-3 | 0.1x"), /速度必须在/u);
+  assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 1-3 | 5x"), /速度必须在/u);
+  assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 1-3 | fast"), /速度无效/u);
+  assert.throws(() => parseClipEntries("C:\\a.mp4\nC:\\b.mp4 | 1-3 | 2x | extra"), /格式无效/u);
+});
+
+test("a clip speed reaches the video and audio chains", () => {
+  const { filter } = buildCompositeFilter({
+    clips: [
+      { duration: 1, hasAudio: true, start: 0, end: 2, speed: 2 },
+      { duration: 6, hasAudio: true, speed: 0.5 },
+      { duration: 1, hasAudio: true, speed: 4 },
+    ],
+    canvas: { width: 1280, height: 720 },
+  });
+  assert.match(filter, /\[0:v\]trim=start=0\.000:end=2\.000,setpts=PTS-STARTPTS,setpts=PTS\/2\.000,scale=/u);
+  assert.match(filter, /\[0:a\]atrim=start=0\.000:end=2\.000,atempo=2,asetpts=PTS-STARTPTS/u);
+  assert.match(filter, /\[1:v\]setpts=PTS\/0\.500,scale=/u);
+  assert.match(filter, /\[1:a\]atempo=0\.5,asetpts=PTS-STARTPTS/u);
+  assert.match(filter, /\[1:a\][^;]*apad=whole_dur=6\.000/u);
+  // atempo stops at 2, so 4× becomes a chain of two 2× steps.
+  assert.match(filter, /\[2:a\]atempo=2,atempo=2,asetpts=PTS-STARTPTS/u);
 });
 
 test("the render canvas maps the three platform ratios", () => {
@@ -104,7 +136,7 @@ test("the composite filter pads, silences and concatenates clips", () => {
   assert.equal(audioLabel, "acat");
   assert.match(filter, /\[0:v\]scale=1280:720:force_original_aspect_ratio=decrease/u);
   assert.match(filter, /pad=1280:720:\(ow-iw\)\/2:\(oh-ih\)\/2:color=black/u);
-  assert.match(filter, /\[0:a\]aresample=48000/u);
+  assert.match(filter, /\[0:a\]asetpts=PTS-STARTPTS,aresample=48000/u);
   assert.match(filter, /apad=whole_dur=4\.000,atrim=0:4\.000/u);
   assert.match(filter, /anullsrc=r=48000:cl=stereo,atrim=0:3\.000/u);
   assert.match(filter, /\[v0\]\[a0\]\[v1\]\[a1\]concat=n=2:v=1:a=1\[vcat\]\[acat\]/u);
@@ -272,6 +304,40 @@ test("the render handler applies trims, honours the transition name and reports 
       }),
       /裁剪结束时间超出片段时长/u,
     );
+  });
+});
+
+test("the render handler reports effective durations after a speed change", async () => {
+  await fixture(async ({ media, artifacts }) => {
+    const calls = [];
+    const map = {
+      "a.mp4": { duration: 4, audio: true },
+      "b.mp4": { duration: 3, audio: false },
+    };
+    const handler = renderHandler({ media, artifacts, runner: renderRunner({ calls, map }) });
+    const outcome = await handler["media.render"]({
+      run: runLike("run_speed"),
+      params: {
+        clips: `${path.join(media, "a.mp4")} | 1-3 | 2x\n${path.join(media, "b.mp4")} |  | 2x`,
+        aspect: "landscape",
+      },
+    });
+
+    assert.match(outcome.logs[0], /2 个片段，合计 0:03/u);
+    const encode = calls.at(-1);
+    const filter = encode.args[encode.args.indexOf("-filter_complex") + 1];
+    assert.match(filter, /\[0:v\]trim=start=1\.000:end=3\.000,setpts=PTS-STARTPTS,setpts=PTS\/2\.000/u);
+    assert.match(filter, /\[0:a\]atrim=start=1\.000:end=3\.000,atempo=2/u);
+    assert.match(filter, /anullsrc=r=48000:cl=stereo,atrim=0:1\.500/u);
+
+    const report = JSON.parse(await readFile(outcome.artifacts[1].path, "utf8"));
+    assert.equal(report.clips[0].seconds, 1);
+    assert.equal(report.clips[0].source_seconds, 2);
+    assert.equal(report.clips[0].speed, 2);
+    assert.deepEqual(report.clips[0].trim, { start: 1, end: 3 });
+    assert.equal(report.clips[1].seconds, 1.5);
+    assert.equal(report.clips[1].source_seconds, 3);
+    assert.equal(report.seconds, 2.5);
   });
 });
 

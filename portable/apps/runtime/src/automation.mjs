@@ -582,7 +582,7 @@ export const AUTOMATION_PIPELINES = Object.freeze([
   {
     id: "video-render",
     name: "影音成片",
-    desc: "把多个片段按顺序合成一条成片：统一画布、可选淡入淡出转场与背景音乐，输出 MP4 与合成报告。",
+    desc: "把多个片段按顺序合成一条成片：统一画布、逐片段裁剪与变速、可选转场与背景音乐，输出 MP4 与合成报告。",
     steps: [
       {
         id: "render",
@@ -602,7 +602,7 @@ export const AUTOMATION_PIPELINES = Object.freeze([
             multiline: true,
             required: true,
             maxLength: 8000,
-            hint: "每行一个白名单内的绝对路径，至少两行；可写成「路径 | 起始-结束」（秒）裁剪该片段，例如 C:\\a.mp4 | 1.5-6",
+            hint: "每行一个白名单内的绝对路径，至少两行；可写成「路径 | 起始-结束 | 速度」，例如 C:\\a.mp4 | 1.5-6 | 1.5x（裁剪后加速 1.5 倍，速度 0.25–4）",
           },
           {
             key: "aspect",

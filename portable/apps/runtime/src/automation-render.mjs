@@ -50,9 +50,25 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+export const RENDER_SPEED_MIN = 0.25;
+export const RENDER_SPEED_MAX = 4;
+
+function parseSpeed(text) {
+  const value = String(text ?? "").trim();
+  if (!value) return null;
+  const match = /^(\d+(?:\.\d+)?)x?$/u.exec(value);
+  if (!match) throw new Error(`片段速度无效：${value}`);
+  const speed = Number(match[1]);
+  if (speed < RENDER_SPEED_MIN || speed > RENDER_SPEED_MAX) {
+    throw new Error(`片段速度必须在 ${RENDER_SPEED_MIN} 到 ${RENDER_SPEED_MAX} 之间`);
+  }
+  return speed === 1 ? 1 : speed;
+}
+
 // One absolute path per line; `#` starts a comment so a playlist can be pasted
-// with notes. A line may end with `| start-end` (seconds) to cut that clip
-// before assembly. Two clips are the minimum, because one clip is a transcode.
+// with notes. A line may end with `| start-end` (seconds) to cut that clip and
+// `| 1.5x` to change its speed before assembly. Two clips are the minimum,
+// because one clip is a transcode.
 export function parseClipEntries(input) {
   if (typeof input !== "string" || !input.trim()) throw new Error("片段列表不能为空");
   const lines = input
@@ -65,22 +81,26 @@ export function parseClipEntries(input) {
     throw new Error(`一次最多合成 ${RENDER_LIMITS.clips} 个片段`);
   }
   return lines.map((line) => {
-    if (line.length > RENDER_LIMITS.lineChars + 40) throw new Error("片段路径过长");
-    const separator = line.lastIndexOf("|");
-    if (separator === -1) {
-      if (line.length > RENDER_LIMITS.lineChars) throw new Error("片段路径过长");
-      return { path: line, start: null, end: null };
-    }
-    const file = line.slice(0, separator).trim();
-    const range = line.slice(separator + 1).trim();
+    if (line.length > RENDER_LIMITS.lineChars + 80) throw new Error("片段路径过长");
+    const parts = line.split("|").map((part) => part.trim());
+    if (parts.length > 3) throw new Error(`片段条目格式无效：${line}`);
+    const file = parts[0];
     if (!file) throw new Error("片段路径不能为空");
     if (file.length > RENDER_LIMITS.lineChars) throw new Error("片段路径过长");
-    const match = /^(\d+(?:\.\d+)?)?\s*-\s*(\d+(?:\.\d+)?)?$/u.exec(range);
-    if (!match || (!match[1] && !match[2])) throw new Error(`片段裁剪范围无效：${range}`);
-    const start = match[1] === undefined ? 0 : Number(match[1]);
-    const end = match[2] === undefined ? null : Number(match[2]);
-    if (end !== null && end <= start) throw new Error(`片段裁剪范围无效：${range}`);
-    return { path: file, start, end };
+    if (parts.length === 1) return { path: file, start: null, end: null, speed: null };
+
+    const range = parts[1];
+    let start = null;
+    let end = null;
+    if (range) {
+      const match = /^(\d+(?:\.\d+)?)?\s*-\s*(\d+(?:\.\d+)?)?$/u.exec(range);
+      if (!match || (!match[1] && !match[2])) throw new Error(`片段裁剪范围无效：${range}`);
+      start = match[1] === undefined ? 0 : Number(match[1]);
+      end = match[2] === undefined ? null : Number(match[2]);
+      if (end !== null && end <= start) throw new Error(`片段裁剪范围无效：${range}`);
+    }
+    const speed = parts.length === 3 ? parseSpeed(parts[2]) : null;
+    return { path: file, start, end, speed };
   });
 }
 
@@ -93,6 +113,22 @@ export function renderCanvas(aspect) {
   if (aspect === "vertical") return { width: RENDER_HEIGHT, height: Math.round((RENDER_HEIGHT * 16) / 9) };
   if (aspect === "square") return { width: RENDER_HEIGHT, height: RENDER_HEIGHT };
   throw new Error("画布规格无效");
+}
+
+// atempo only accepts 0.5–2, so a wider speed is expressed as a chain.
+function atempoChain(speed) {
+  const steps = [];
+  let remaining = speed;
+  while (remaining > 2) {
+    steps.push(2);
+    remaining /= 2;
+  }
+  while (remaining < 0.5) {
+    steps.push(0.5);
+    remaining /= 0.5;
+  }
+  steps.push(Number(remaining.toFixed(3)));
+  return steps.map((step) => `atempo=${step}`).join(",");
 }
 
 // Pure filter builder: the handler probes the clips, this decides how they are
@@ -109,21 +145,25 @@ export function buildCompositeFilter({
   if (!Array.isArray(clips) || clips.length < 2) throw new Error("至少要两个片段才能合成");
   const lines = [];
   clips.forEach((clip, index) => {
-    // Trim first so scaling only touches the frames that survive.
+    // Trim first so scaling only touches the frames that survive; the speed
+    // factor then compresses or stretches what is left.
     const trimVideo = clip.start !== null && clip.start !== undefined
       ? `trim=start=${Number(clip.start).toFixed(3)}:end=${Number(clip.end).toFixed(3)},setpts=PTS-STARTPTS,`
       : "";
+    const speedVideo = clip.speed && clip.speed !== 1 ? `setpts=PTS/${Number(clip.speed).toFixed(3)},` : "";
     lines.push(
-      `[${index}:v]${trimVideo}scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=decrease,`
+      `[${index}:v]${trimVideo}${speedVideo}scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=decrease,`
       + `pad=${canvas.width}:${canvas.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,`
       + `fps=30,format=yuv420p,setpts=PTS-STARTPTS[v${index}]`,
     );
     const trimAudio = clip.start !== null && clip.start !== undefined
-      ? `atrim=start=${Number(clip.start).toFixed(3)}:end=${Number(clip.end).toFixed(3)},asetpts=PTS-STARTPTS,`
+      ? `atrim=start=${Number(clip.start).toFixed(3)}:end=${Number(clip.end).toFixed(3)},`
       : "";
+    const speedAudio = clip.speed && clip.speed !== 1 ? `${atempoChain(clip.speed)},` : "";
     if (clip.hasAudio) {
       lines.push(
-        `[${index}:a]${trimAudio}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,`
+        `[${index}:a]${trimAudio}${speedAudio}asetpts=PTS-STARTPTS,`
+        + `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,`
         + `apad=whole_dur=${clip.duration.toFixed(3)},atrim=0:${clip.duration.toFixed(3)},`
         + `asetpts=PTS-STARTPTS[a${index}]`,
       );
@@ -236,12 +276,15 @@ export function createRenderHandler({
         if (media.duration && end > media.duration + 0.05) {
           throw new Error(`裁剪结束时间超出片段时长：${path.basename(file)}`);
         }
+        const speed = entry.speed ?? 1;
         clips.push({
           file,
           name: path.basename(file),
-          duration: end - start,
+          duration: (end - start) / speed,
+          sourceDuration: end - start,
           start: entry.start === null || entry.start === undefined ? null : start,
           end: entry.start === null || entry.start === undefined ? null : end,
+          speed,
           hasAudio: Boolean(media.audio),
           width: media.video.width,
           height: media.video.height,
@@ -326,6 +369,7 @@ export function createRenderHandler({
           name: clip.name,
           seconds: Number(clip.duration.toFixed(2)),
           ...(clip.start === null ? {} : { trim: { start: clip.start, end: clip.end } }),
+          ...(clip.speed === 1 ? {} : { speed: clip.speed, source_seconds: Number(clip.sourceDuration.toFixed(2)) }),
           has_audio: clip.hasAudio,
           width: clip.width,
           height: clip.height,
