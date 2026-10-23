@@ -258,6 +258,16 @@ export async function startLocalRuntime(options = {}) {
   const ollamaUrl = options.ollamaUrl ?? env.ALLROUND_AI_OLLAMA_URL ?? env.OLLAMA_HOST;
   const deepseekKey = options.deepseekKey ?? env.ALLROUND_AI_DEEPSEEK_KEY;
   const deepseekUrl = options.deepseekUrl ?? env.ALLROUND_AI_DEEPSEEK_URL;
+  // A key saved through the settings screen also enables the engine on the
+  // next start, so an operator never has to edit the service definition.
+  let bootDeepseekKey = "";
+  try {
+    bootDeepseekKey = await configStore.getSecret("ai.apiKey") ?? "";
+  } catch {
+    bootDeepseekKey = "";
+  }
+  const deepseekConfigured = (typeof deepseekKey === "string" && deepseekKey.trim())
+    || (typeof bootDeepseekKey === "string" && bootDeepseekKey.trim());
   // A key saved through the settings screen wins over the environment, so an
   // operator can rotate it without editing the service definition.
   const storedDeepseekKey = async () => {
@@ -279,7 +289,7 @@ export async function startLocalRuntime(options = {}) {
     if (typeof ollamaUrl === "string" && ollamaUrl.trim()) {
       configuredProviders.push(createOllamaProvider({ baseUrl: ollamaUrl }));
     }
-    if (typeof deepseekKey === "string" && deepseekKey.trim()) {
+    if (deepseekConfigured) {
       configuredProviders.push(createDeepseekProvider({ apiKey: storedDeepseekKey, baseUrl: deepseekUrl }));
     }
   }

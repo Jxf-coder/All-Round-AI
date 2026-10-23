@@ -16,9 +16,23 @@ function readBody(request) {
   });
 }
 
-async function bootRuntime(env) {
+function stubConfigStore(secret = "") {
+  const values = new Map();
+  const secrets = new Map(secret ? [["ai.apiKey", secret]] : []);
+  return {
+    async get(key) { return values.get(key) ?? null; },
+    async set(key, value) { values.set(key, value); },
+    async delete(key) { values.delete(key); },
+    async getSecret(key) { return secrets.get(key) ?? null; },
+    async setSecret(key, value) { secrets.set(key, value); },
+    async deleteSecret(key) { secrets.delete(key); },
+  };
+}
+
+async function bootRuntime(env, options = {}) {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "allround-deepseek-api-"));
   const runtime = await startLocalRuntime({
+    ...options,
     authProvider: async ({ user }) => ({
       ok: true,
       user: { id: user, name: user, role: "admin", source: "all-round-ai" },
@@ -84,6 +98,46 @@ test("DeepSeek is registered when a key is configured and can answer chat", asyn
     assert.equal(seen.length, 1);
     assert.equal(seen[0].auth, "Bearer sk-test");
     assert.equal(seen[0].body.model, "deepseek-chat");
+  } finally {
+    await app.close();
+    await new Promise((resolve, reject) => stub.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("a key stored in settings registers DeepSeek on the next start", async () => {
+  const seen = [];
+  const stub = createServer(async (request, response) => {
+    seen.push(request.headers.authorization);
+    await readBody(request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      choices: [{ message: { role: "assistant", content: "存储密钥回复" }, finish_reason: "stop" }],
+    }));
+  });
+  await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
+  const deepseekUrl = `http://127.0.0.1:${stub.address().port}`;
+  const app = await bootRuntime(
+    { ALLROUND_AI_DEEPSEEK_URL: deepseekUrl, ALLROUND_AI_ENGINE: "deepseek" },
+    { configStore: stubConfigStore("sk-stored") },
+  );
+  try {
+    const models = await (await fetch(`${app.runtime.url}/api/ai/models`, {
+      headers: { cookie: app.cookie },
+    })).json();
+    assert.deepEqual(models.engines.map((engine) => engine.id), ["mock", "deepseek"]);
+    assert.equal(models.provider, "deepseek");
+
+    const reply = await fetch(`${app.runtime.url}/api/ai/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: app.runtime.url, cookie: app.cookie },
+      body: JSON.stringify({
+        engine: "deepseek",
+        messages: [{ role: "user", content: "你好" }],
+      }),
+    });
+    assert.equal(reply.status, 200);
+    assert.equal((await reply.json()).content, "存储密钥回复");
+    assert.equal(seen[0], "Bearer sk-stored");
   } finally {
     await app.close();
     await new Promise((resolve, reject) => stub.close((error) => (error ? reject(error) : resolve())));
