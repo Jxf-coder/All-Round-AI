@@ -156,7 +156,11 @@ async function openConversation(id) {
   conversation.replaceChildren();
   welcome.classList.add("hidden");
   for (const message of document_.messages) {
-    const bubble = appendMessage(message.role === "user" ? "" : "assistant-message", message.content);
+    const bubble = appendMessage(
+      message.role === "user" ? "" : "assistant-message",
+      message.content,
+      { markdown: message.role === "assistant" },
+    );
     if (message.role === "assistant") renderCitations(bubble, message.citations);
   }
   renderReplyActions(document_.messages);
@@ -235,10 +239,45 @@ async function ensureConversation() {
   return activeConversationId;
 }
 
-function appendMessage(className, text = "") {
+// ---------------------------------------------------------------------------
+// Rich assistant replies. The Markdown module is loaded before this script and
+// publishes `AllRoundMarkdown`; plain text remains the fallback so a missing
+// module never breaks the conversation. Raw HTML is escaped by the renderer.
+// ---------------------------------------------------------------------------
+const messageSources = new WeakMap();
+const richFrames = new WeakMap();
+
+function renderRichContent(node, text) {
+  messageSources.set(node, text);
+  const toHtml = globalThis.AllRoundMarkdown?.toHtml;
+  if (typeof toHtml !== "function") {
+    node.textContent = text;
+    return;
+  }
+  node.replaceChildren();
+  const body = document.createElement("div");
+  body.className = "mdx-content";
+  body.innerHTML = toHtml(text);
+  node.append(body);
+}
+
+// Deltas arrive far more often than a frame, so the bubble is re-rendered at
+// most once per animation frame while the full text is still kept in place.
+function scheduleRichContent(node, text) {
+  messageSources.set(node, text);
+  if (richFrames.get(node)) return;
+  const frame = requestAnimationFrame(() => {
+    richFrames.delete(node);
+    renderRichContent(node, messageSources.get(node) ?? "");
+  });
+  richFrames.set(node, frame);
+}
+
+function appendMessage(className, text = "", { markdown = false } = {}) {
   const node = document.createElement("div");
   node.className = `message ${className}`;
-  node.textContent = text;
+  if (markdown) renderRichContent(node, text);
+  else node.textContent = text;
   conversation.append(node);
   conversation.scrollTop = conversation.scrollHeight;
   return node;
@@ -2811,7 +2850,7 @@ async function streamReply(payload, stream) {
       if (chunk.meta) applyTurnMeta(chunk.meta);
       if (chunk.meta?.citations) renderCitations(stream.target, chunk.meta.citations);
       if (chunk.stage) setLiveStage(chunk.status);
-      if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
+      if (chunk.delta) { answer += chunk.delta; scheduleRichContent(stream.target, answer); }
       if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
       if (chunk.done) {
         if (chunk.cancelled || chunk.status === "cancelled") outcome = "cancelled";
@@ -2824,6 +2863,7 @@ async function streamReply(payload, stream) {
     stream.target.textContent = "AI 服务未返回内容。";
     outcome = "failed";
   }
+  if (answer) renderRichContent(stream.target, answer);
   return outcome;
 }
 
@@ -2850,7 +2890,7 @@ async function followLiveTurn(conversationId, after, stream) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let answer = stream.target.textContent || "";
+  let answer = messageSources.get(stream.target) ?? "";
   let outcome = "done";
   while (true) {
     const { value, done } = await reader.read();
@@ -2865,7 +2905,7 @@ async function followLiveTurn(conversationId, after, stream) {
       try { chunk = JSON.parse(line.slice(6)); } catch { continue; }
       if (chunk.meta) applyTurnMeta(chunk.meta);
       if (chunk.meta?.citations) renderCitations(stream.target, chunk.meta.citations);
-      if (chunk.delta) { answer += chunk.delta; stream.target.textContent = answer; }
+      if (chunk.delta) { answer += chunk.delta; scheduleRichContent(stream.target, answer); }
       if (chunk.error) { stream.target.textContent = chunk.error; outcome = "failed"; }
       if (chunk.done) {
         if (chunk.status === "cancelled") outcome = "cancelled";
@@ -2874,6 +2914,7 @@ async function followLiveTurn(conversationId, after, stream) {
       conversation.scrollTop = conversation.scrollHeight;
     }
   }
+  if (answer) renderRichContent(stream.target, answer);
   return outcome;
 }
 
@@ -2890,7 +2931,7 @@ async function reattachLiveTurn(conversationId) {
   if (!response?.ok) return;
   const { turn } = await response.json().catch(() => ({}));
   if (!turn || turn.status !== "running") return;
-  const target = appendMessage("assistant-message", turn.text || "");
+  const target = appendMessage("assistant-message", turn.text || "", { markdown: true });
   activeStream = { controller: new AbortController(), target, conversationId, turnId: turn.id };
   setStreaming(true);
   if (turn.effort) resolvedEffort = turn.effort;

@@ -49,6 +49,7 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(pageHtml, /ALL ROUND AI · AI WORKSPACE/);
     assert.match(pageHtml, /href="workbench\.css"/);
     assert.match(pageHtml, /src="workbench\.js"/);
+    assert.match(pageHtml, /<script type="module" src="markdown\.mjs"><\/script>/);
     assert.match(pageHtml, /id="panel-view"/);
     assert.match(pageHtml, /aria-label="人格与记忆"/);
     // Memory candidates are reviewed before they reach MEMORY.md.
@@ -82,6 +83,18 @@ test("local runtime serves health only on loopback and logs its lifecycle", asyn
     assert.match(styleSource, /\.intake-grid\{/);
     assert.match(scriptSource, /renderScoutBlock/);
     assert.match(scriptSource, /sourcesSave/);
+
+    // Assistant replies are rendered as Markdown; the module ships beside the
+    // workbench and the stylesheet carries the matching block rhythm.
+    const markdown = await fetch(`${runtime.url}/markdown.mjs`);
+    assert.equal(markdown.status, 200);
+    assert.match(markdown.headers.get("content-type"), /javascript/);
+    const markdownSource = await markdown.text();
+    assert.match(markdownSource, /AllRoundMarkdown/);
+    assert.match(scriptSource, /scheduleRichContent/);
+    assert.match(styleSource, /\.mdx-content/);
+    assert.match(styleSource, /\.mdx-code-block/);
+    assert.match(styleSource, /\.assistant-message\{[^}]*border-radius:18px 18px 18px 5px/);
     assert.match(scriptSource, /scoutRun/);
     assert.match(scriptSource, /scoutDistill/);
     assert.match(scriptSource, /distillScoutRun/);

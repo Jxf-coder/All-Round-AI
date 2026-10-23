@@ -366,3 +366,54 @@ html.dark .skill-ready.off{color:#f3c07a}
    cards; keep it as a small unobtrusive footer instead. */
 .local-notice{position:absolute;right:18px;bottom:6px;top:auto;max-width:calc(100% - 36px);padding:2px 6px;border-radius:6px;background:#ffffffb8;color:#9ca7b5;font-size:9px;line-height:1.4;text-align:right;pointer-events:none}
 html.dark .local-notice{background:#0b1422cc;color:#d0def87a}
+
+/* Chat bubbles and Markdown follow the reference chat surface: 18px corners
+   with an 18/5 cut on the last line, 15px reply text and the same block
+   rhythm used by the portal. */
+.conversation{gap:24px}
+.message{max-width:85%;padding:12px 16px;border-radius:18px 18px 5px 18px;font-size:14px;line-height:1.7;background:var(--bubble-user,#0a182e);color:#fff}
+.assistant-message{width:100%;max-width:85%;padding:15px 17px;border-radius:18px 18px 18px 5px;background:var(--surface-2,#fff);border:1px solid var(--hairline);color:var(--ink);font-size:15px;line-height:1.75;box-shadow:0 1px 2px rgba(10,24,46,.05)}
+.message-actions{margin-top:0}
+.message-action{min-height:32px;padding:4px 8px;border-color:transparent;border-radius:8px;font-size:12px}
+html.dark .message{background:#0a182e;color:#fff}
+html.dark .assistant-message{background:#16253b;color:#dbe5f4;border-color:var(--hairline)}
+
+.mdx-content{min-width:0;overflow-wrap:anywhere;line-height:1.75}
+.mdx-content>:first-child{margin-top:0}
+.mdx-content>:last-child{margin-bottom:0}
+.mdx-content p{margin:.65em 0;white-space:pre-line}
+.mdx-content :is(h1,h2,h3,h4,h5,h6){margin:1.05em 0 .45em;color:var(--ink);font-weight:650;line-height:1.45}
+.mdx-content h1{font-size:1.4em}
+.mdx-content h2{font-size:1.25em}
+.mdx-content h3{font-size:1.12em}
+.mdx-content :is(h4,h5,h6){font-size:1em}
+.mdx-content :is(ul,ol){margin:.65em 0;padding-left:1.55em}
+.mdx-content ul{list-style-type:disc}
+.mdx-content ol{list-style-type:decimal}
+.mdx-content ul ul{list-style-type:circle}
+.mdx-content li{padding-left:.12em;margin:.28em 0}
+.mdx-content li>p{margin:.25em 0}
+.mdx-content li>:is(ul,ol){margin-top:.2em;margin-bottom:.35em}
+.mdx-content blockquote{margin:.75em 0;border-left:3px solid var(--hairline);padding:.12em 0 .12em 1em;color:var(--muted)}
+.mdx-content blockquote>:first-child{margin-top:0}
+.mdx-content blockquote>:last-child{margin-bottom:0}
+.mdx-content a{color:var(--accent);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
+.mdx-content a:focus-visible,.mdx-content .mdx-table-scroll:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.mdx-content :not(pre)>code{border-radius:5px;background:var(--chip);padding:.08em .32em;font-size:.9em;white-space:pre-wrap}
+.mdx-content .mdx-code-block{max-width:100%;margin:.8em 0;overflow-x:auto;border:1px solid var(--hairline);border-radius:10px;background:var(--chip);padding:12px;font-size:12px;line-height:1.65;white-space:pre;overflow-wrap:normal;tab-size:2}
+.mdx-content .mdx-code-block code{color:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.mdx-content hr{margin:1em 0;border:0;border-top:1px solid var(--hairline)}
+.mdx-content .mdx-table-scroll{width:100%;max-width:100%;margin:.85em 0;overflow-x:auto;overscroll-behavior-inline:contain;border:1px solid var(--hairline);border-radius:9px}
+.mdx-content .mdx-table-scroll table{display:table;min-width:100%;max-width:none;border-collapse:collapse;font-size:.9em;line-height:1.65}
+.mdx-content :is(th,td){min-width:6rem;border-right:1px solid var(--hairline);border-bottom:1px solid var(--hairline);padding:8px 11px;vertical-align:top}
+.mdx-content th{background:var(--chip);font-weight:600}
+.mdx-content tr:last-child td{border-bottom:0}
+.mdx-content tr>:last-child{border-right:0}
+.mdx-content [data-align="left"]{text-align:left}
+.mdx-content [data-align="center"]{text-align:center}
+.mdx-content [data-align="right"]{text-align:right}
+/* The reference theme lifts the accent in dark mode; the link colour follows
+   so it stays readable on the dark bubble. */
+html.dark{--accent:#7b8cff}
+html.dark .mdx-content a{color:#7b8cff}
+@media(max-width:767px){.conversation{gap:20px}.message{max-width:92%}.assistant-message{max-width:100%;padding:12px}.mdx-content :is(th,td){min-width:6rem;padding:7px 9px}.mdx-content .mdx-code-block{padding:10px}}

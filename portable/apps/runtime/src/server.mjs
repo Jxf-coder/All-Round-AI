@@ -76,6 +76,7 @@ const CONTENT_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
+  [".mjs", "text/javascript; charset=utf-8"],
 ]);
 const ARTIFACT_CONTENT_TYPES = new Map([
   [".m4a", "audio/mp4"],
