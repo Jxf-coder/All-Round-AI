@@ -129,6 +129,68 @@ test("segments become cues with proportional splits and a guaranteed gap", () =>
   assert.throws(() => buildCues(null), /缺少分段/u);
 });
 
+test("word timestamps become cue boundaries when they cover the segment", () => {
+  const cues = buildCues([{
+    start: 0,
+    end: 4,
+    text: "第一句话。第二句",
+    words: [
+      { start: 0, end: 0.8, word: "第一" },
+      { start: 0.8, end: 1.8, word: "句话。" },
+      { start: 2.4, end: 3.2, word: "第二" },
+      { start: 3.2, end: 4, word: "句" },
+    ],
+  }], { maxChars: 6, minGapMs: 120 });
+
+  assert.deepEqual(cues.map((cue) => [cue.start, cue.end, cue.text]), [
+    [0, 1800, "第一句话。"],
+    [2400, 4000, "第二句"],
+  ]);
+});
+
+test("Latin words keep their spacing and still respect the character cap", () => {
+  const cues = buildCues([{
+    start: 0,
+    end: 2,
+    text: "hello world",
+    words: [
+      { start: 0, end: 0.6, word: "hello" },
+      { start: 0.6, end: 1.4, word: "world" },
+    ],
+  }], { maxChars: 5 });
+
+  assert.deepEqual(cues.map((cue) => [cue.start, cue.end, cue.text]), [
+    [0, 600, "hello"],
+    [720, 1400, "world"],
+  ]);
+});
+
+test("partial word timings fall back to proportional splitting", () => {
+  const cues = buildCues([{
+    start: 0,
+    end: 3,
+    text: "第一句话",
+    words: [{ start: 0, end: 1, word: "第一" }],
+  }]);
+
+  assert.deepEqual(cues.map((cue) => [cue.start, cue.end, cue.text]), [[0, 3000, "第一句话"]]);
+});
+
+test("word timings outside the segment are clamped and unusable words ignored", () => {
+  const cues = buildCues([{
+    start: 1,
+    end: 2,
+    text: "一二",
+    words: [
+      { start: 0.5, end: 1.2, word: "一" },
+      { start: 1.2, end: 1.2, word: "坏" },
+      { start: 1.2, end: 2.4, word: "二" },
+    ],
+  }]);
+
+  assert.deepEqual(cues.map((cue) => [cue.start, cue.end, cue.text]), [[1000, 2000, "一二"]]);
+});
+
 test("the sidecar response is validated before anything is written", () => {
   assert.equal(parseSidecarOutput(`${JSON.stringify(SIDECAR_OK)}\n`).language, "zh");
   assert.equal(parseSidecarOutput(`log line\n${JSON.stringify(SIDECAR_OK)}`).segments.length, 2);

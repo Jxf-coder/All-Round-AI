@@ -66,8 +66,63 @@ export function splitCueText(text, maxChars = ASR_LIMITS.maxChars) {
   return chunks;
 }
 
-// Segments become cues with a small guaranteed gap, and a long segment is
-// divided in proportion to the characters it produced.
+// Word timestamps are only trusted when they actually account for the segment
+// text: a recogniser may return words for part of a sentence, and mixing those
+// timings with the rest would push the tail of the cue out of sync.
+function usableWords(segment, start, end) {
+  if (!Array.isArray(segment?.words) || !segment.words.length) return null;
+  const words = [];
+  for (const entry of segment.words) {
+    const text = String(entry?.word ?? entry?.text ?? "").replace(/\s+/gu, " ").trim();
+    const wordStart = Math.round(Number(entry?.start) * 1_000);
+    const wordEnd = Math.round(Number(entry?.end) * 1_000);
+    if (!text || !Number.isFinite(wordStart) || !Number.isFinite(wordEnd) || wordEnd <= wordStart) continue;
+    words.push({ text, start: Math.max(start, wordStart), end: Math.min(end, wordEnd) });
+  }
+  const spoken = words.map((word) => word.text).join("").replace(/\s+/gu, "");
+  const segmentChars = Array.from(String(segment.text ?? "").replace(/\s+/gu, "")).length;
+  if (!spoken || !segmentChars) return null;
+  if (Array.from(spoken).length < segmentChars * 0.6) return null;
+  return words.filter((word) => word.end > word.start);
+}
+
+// Chinese words join directly; two Latin words need their separating space
+// back, otherwise "hello world" becomes "helloworld".
+function joinWords(words) {
+  let text = "";
+  for (const word of words) {
+    const previous = text.at(-1);
+    if (text && /[A-Za-z0-9]$/u.test(previous) && /^[A-Za-z0-9]/u.test(word.text)) text += " ";
+    text += word.text;
+  }
+  return text.replace(/\s+/gu, " ").trim();
+}
+
+function chunkWords(words, maxChars) {
+  const chunks = [];
+  const minBeforePunctuation = Math.min(6, Math.max(2, Math.floor(maxChars / 3)));
+  let current = [];
+  let length = 0;
+  const flush = () => {
+    if (!current.length) return;
+    const text = joinWords(current);
+    if (text) chunks.push({ text, start: current[0].start, end: current[current.length - 1].end });
+    current = [];
+    length = 0;
+  };
+  for (const word of words) {
+    current.push(word);
+    length += Array.from(word.text).length;
+    const lastChar = Array.from(word.text).at(-1);
+    if ((PUNCTUATION.test(lastChar) && length >= minBeforePunctuation) || length >= maxChars) flush();
+  }
+  flush();
+  return chunks;
+}
+
+// Segments become cues with a small guaranteed gap. When the recogniser
+// returned word timestamps that cover the segment text, cue boundaries follow
+// the words; otherwise a long segment is divided in proportion to characters.
 export function buildCues(segments, { maxChars = ASR_LIMITS.maxChars, minGapMs = ASR_LIMITS.minGapMs } = {}) {
   if (!Array.isArray(segments)) throw new Error("识别结果缺少分段");
   const cues = [];
@@ -75,6 +130,17 @@ export function buildCues(segments, { maxChars = ASR_LIMITS.maxChars, minGapMs =
     const start = Math.round(Number(segment?.start) * 1_000);
     const end = Math.round(Number(segment?.end) * 1_000);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+
+    const words = usableWords(segment, start, end);
+    if (words) {
+      for (const chunk of chunkWords(words, maxChars)) {
+        const cueStart = Math.max(start, Math.min(chunk.start, end));
+        const cueEnd = Math.min(end, Math.max(chunk.end, cueStart + 200));
+        if (cueEnd > cueStart) cues.push({ start: cueStart, end: cueEnd, text: chunk.text });
+      }
+      continue;
+    }
+
     const chunks = splitCueText(segment.text, maxChars);
     if (!chunks.length) continue;
     const totalChars = chunks.reduce((sum, chunk) => sum + Array.from(chunk).length, 0);

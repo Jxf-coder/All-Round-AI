@@ -658,7 +658,7 @@ export const AUTOMATION_PIPELINES = Object.freeze([
   {
     id: "asr-subtitle",
     name: "语音转字幕",
-    desc: "把来源白名单内的音频或视频转成 SRT 字幕与识别稿：本机 faster-whisper 识别，不上传云端。",
+    desc: "把来源白名单内的音频或视频转成 SRT 字幕与识别稿：本机 faster-whisper 识别，字幕按识别词的起止时间对齐，不上传云端。",
     steps: [
       {
         id: "transcribe",
